@@ -45,9 +45,7 @@ def load_tables() -> dict:
     operadores = r("OPERADORES.csv")
     lotes = r("LOTES.csv")
     fallas_cat = r("FALLAS_CATALOGO.csv")
-
-    # Catálogo proceso DESDE el ZIP
-    cat_proceso = r("CAT_PROCESO.csv")
+    cat_proceso = r("CAT_PROCESO.csv")  # desde ZIP
 
     # Tipos
     turnos["FECHA"] = pd.to_datetime(turnos["FECHA"], errors="coerce")
@@ -93,16 +91,8 @@ def build_enriched_turnos(turnos, operadores, lotes):
     t["CULTIVO"] = t["ID_LOTE"].astype(str).map(lote_map)
     return t
 
-def safe_div(a, b):
-    try:
-        if b is None or b == 0 or (isinstance(b, float) and np.isnan(b)):
-            return np.nan
-        return a / b
-    except Exception:
-        return np.nan
-
 # =========================================================
-# CSS (Cards centrados + sin espacios vacíos)
+# CSS
 # =========================================================
 st.markdown(
     """
@@ -117,26 +107,12 @@ st.markdown(
         display: flex;
         flex-direction: column;
         justify-content: center;
-        align-items: center;      /* centra horizontal */
-        text-align: center;       /* centra texto */
+        align-items: center;
+        text-align: center;
     }
-    .kpi-title{
-        font-size: 12px;
-        opacity: 0.75;
-        margin-bottom: 6px;
-        line-height: 1.1;
-    }
-    .kpi-value{
-        font-size: 30px;
-        font-weight: 780;
-        line-height: 1.05;
-    }
-    .kpi-sub{
-        font-size: 12px;
-        opacity: 0.7;
-        margin-top: 6px;
-        line-height: 1.1;
-    }
+    .kpi-title{ font-size: 12px; opacity: 0.75; margin-bottom: 6px; line-height: 1.1; }
+    .kpi-value{ font-size: 30px; font-weight: 780; line-height: 1.05; }
+    .kpi-sub{ font-size: 12px; opacity: 0.7; margin-top: 6px; line-height: 1.1; }
     .panel{
         border: 2px solid rgba(0,0,0,0.18);
         border-radius: 14px;
@@ -144,24 +120,9 @@ st.markdown(
         background: rgba(255,255,255,0.02);
         margin-bottom: 14px;
     }
-    .title-wrap{
-        margin-top: 8px;
-        margin-bottom: 12px;
-    }
-    .main-title{
-        font-size: 46px;
-        font-weight: 900;
-        letter-spacing: 0.5px;
-        margin: 0;
-        line-height: 1.05;
-    }
-    .sub-title{
-        font-size: 18px;
-        opacity: 0.8;
-        margin: 10px 0 0 0;
-        line-height: 1.2;
-        font-weight: 600;
-    }
+    .title-wrap{ margin-top: 8px; margin-bottom: 12px; }
+    .main-title{ font-size: 46px; font-weight: 900; letter-spacing: 0.5px; margin: 0; line-height: 1.05; }
+    .sub-title{ font-size: 18px; opacity: 0.8; margin: 10px 0 0 0; line-height: 1.2; font-weight: 600; }
     </style>
     """,
     unsafe_allow_html=True
@@ -182,105 +143,131 @@ def kpi_card(title, value_text, color=None, sub=None):
     )
 
 def mttr_color(v):
-    if pd.isna(v):
-        return None
-    if v > 1.5:
-        return "#d62728"  # rojo
-    if v < 1.2:
-        return "#2ca02c"  # verde
+    if pd.isna(v): return None
+    if v > 1.5: return "#d62728"
+    if v < 1.2: return "#2ca02c"
     return None
 
 def mtbf_color(v):
-    if pd.isna(v):
-        return None
-    if v < 100:
-        return "#d62728"  # rojo
-    if 100 <= v <= 500:
-        return "#2ca02c"  # verde
-    return "#1f77b4"      # azul
+    if pd.isna(v): return None
+    if v < 100: return "#d62728"
+    if 100 <= v <= 500: return "#2ca02c"
+    return "#1f77b4"
 
 # =========================================================
 # LOAD
 # =========================================================
 tables = load_tables()
-turnos = tables["turnos"]
+turnos = build_enriched_turnos(tables["turnos"], tables["operadores"], tables["lotes"])
 horometros = tables["horometros"]
 eventos = tables["eventos"]
-operadores = tables["operadores"]
-lotes = tables["lotes"]
 fallas_cat = tables["fallas_cat"]
 cat_proceso = tables["cat_proceso"]
 
-turnos = build_enriched_turnos(turnos, operadores, lotes)
-
 # =========================================================
-# SIDEBAR FILTERS (sin LOTE)
+# SIDEBAR WITH FORM (APLICAR FILTROS)
 # =========================================================
 st.sidebar.header("Filtros")
 
+# defaults iniciales
 min_d = turnos["FECHA"].min()
 max_d = turnos["FECHA"].max()
-date_range = st.sidebar.date_input(
-    "Rango de fechas",
-    value=(min_d.date() if pd.notna(min_d) else None, max_d.date() if pd.notna(max_d) else None),
-)
+default_date = (min_d.date() if pd.notna(min_d) else None, max_d.date() if pd.notna(max_d) else None)
 
+# session_state para conservar selección aplicada
+if "applied" not in st.session_state:
+    st.session_state.applied = {
+        "date_range": default_date,
+        "proc_label": "(Todos)",
+        "cultivo": "(Todos)",
+        "tractor": "(Todos)",
+        "implemento": "(Todos)",
+        "operador": "(Todos)",
+        "turno": "(Todos)",
+        "vista_disp": "Sistema (TRC+IMP)",
+    }
+
+# Pre-opciones (sin filtrar todavía para evitar re-render)
+proc_map = dict(zip(cat_proceso["ID_PROCESO"], cat_proceso["NOMBRE_PROCESO"]))
+all_proc_ids = sorted(turnos["ID_PROCESO"].dropna().astype(str).unique().tolist())
+proc_labels = ["(Todos)"] + [f"{proc_map.get(pid, 'PROCESO')} [{pid}]" for pid in all_proc_ids]
+
+cult_opts_all = ["(Todos)"] + sorted(turnos["CULTIVO"].dropna().astype(str).unique().tolist())
+trc_opts_all = ["(Todos)"] + sorted(turnos["ID_TRACTOR"].dropna().astype(str).unique().tolist())
+imp_opts_all = ["(Todos)"] + sorted(turnos["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist())
+op_opts_all = ["(Todos)"] + sorted(turnos["OPERADOR_NOMBRE"].dropna().astype(str).unique().tolist())
+turno_opts_all = ["(Todos)"] + sorted(turnos["TURNO"].dropna().astype(str).unique().tolist())
+
+with st.sidebar.form("filtros_form", clear_on_submit=False):
+    date_range = st.date_input("Rango de fechas", value=st.session_state.applied["date_range"])
+
+    proc_label_sel = st.selectbox("Proceso", proc_labels, index=proc_labels.index(st.session_state.applied["proc_label"]) if st.session_state.applied["proc_label"] in proc_labels else 0)
+    cult_sel = st.selectbox("Cultivo", cult_opts_all, index=cult_opts_all.index(st.session_state.applied["cultivo"]) if st.session_state.applied["cultivo"] in cult_opts_all else 0)
+    trc_sel = st.selectbox("Tractor", trc_opts_all, index=trc_opts_all.index(st.session_state.applied["tractor"]) if st.session_state.applied["tractor"] in trc_opts_all else 0)
+    imp_sel = st.selectbox("Implemento", imp_opts_all, index=imp_opts_all.index(st.session_state.applied["implemento"]) if st.session_state.applied["implemento"] in imp_opts_all else 0)
+    op_sel = st.selectbox("Operador", op_opts_all, index=op_opts_all.index(st.session_state.applied["operador"]) if st.session_state.applied["operador"] in op_opts_all else 0)
+    turno_sel = st.selectbox("Turno (D/N)", turno_opts_all, index=turno_opts_all.index(st.session_state.applied["turno"]) if st.session_state.applied["turno"] in turno_opts_all else 0)
+
+    vista_disp = st.radio(
+        "Disponibilidad / MTBF / MTTR basados en:",
+        ["Sistema (TRC+IMP)", "Tractor", "Implemento"],
+        index=["Sistema (TRC+IMP)", "Tractor", "Implemento"].index(st.session_state.applied["vista_disp"])
+    )
+
+    apply_btn = st.form_submit_button("✅ Aplicar filtros")
+
+if apply_btn:
+    st.session_state.applied = {
+        "date_range": date_range,
+        "proc_label": proc_label_sel,
+        "cultivo": cult_sel,
+        "tractor": trc_sel,
+        "implemento": imp_sel,
+        "operador": op_sel,
+        "turno": turno_sel,
+        "vista_disp": vista_disp,
+    }
+
+# usar SIEMPRE los filtros aplicados
+ap = st.session_state.applied
+date_range = ap["date_range"]
+proc_label_sel = ap["proc_label"]
+cult_sel = ap["cultivo"]
+trc_sel = ap["tractor"]
+imp_sel = ap["implemento"]
+op_sel = ap["operador"]
+turno_sel = ap["turno"]
+vista_disp = ap["vista_disp"]
+
+# =========================================================
+# FILTRADO UNA SOLA VEZ (cuando se aplica)
+# =========================================================
 df_f = turnos.copy()
+
 if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
     d1 = pd.to_datetime(date_range[0])
     d2 = pd.to_datetime(date_range[1])
     df_f = df_f[(df_f["FECHA"] >= d1) & (df_f["FECHA"] <= d2)]
 
-# Proceso con catálogo
-proc_map = dict(zip(cat_proceso["ID_PROCESO"], cat_proceso["NOMBRE_PROCESO"]))
-proc_ids = sorted(df_f["ID_PROCESO"].dropna().astype(str).unique().tolist())
-proc_labels = ["(Todos)"] + [f"{proc_map.get(pid, 'PROCESO')} [{pid}]" for pid in proc_ids]
-proc_label_sel = st.sidebar.selectbox("Proceso", proc_labels, index=0)
 if proc_label_sel != "(Todos)":
     id_proceso = proc_label_sel.split("[")[-1].replace("]", "").strip()
     df_f = df_f[df_f["ID_PROCESO"].astype(str) == id_proceso]
 
-# Cultivo
-cult_opts = ["(Todos)"] + sorted(df_f["CULTIVO"].dropna().astype(str).unique().tolist())
-cult_sel = st.sidebar.selectbox("Cultivo", cult_opts, index=0)
 if cult_sel != "(Todos)":
     df_f = df_f[df_f["CULTIVO"].astype(str) == str(cult_sel)]
 
-# Tractor
-trc_opts = ["(Todos)"] + sorted(df_f["ID_TRACTOR"].dropna().astype(str).unique().tolist())
-trc_sel = st.sidebar.selectbox("Tractor", trc_opts, index=0)
 if trc_sel != "(Todos)":
     df_f = df_f[df_f["ID_TRACTOR"].astype(str) == str(trc_sel)]
 
-# Implemento
-imp_opts = ["(Todos)"] + sorted(df_f["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist())
-imp_sel = st.sidebar.selectbox("Implemento", imp_opts, index=0)
 if imp_sel != "(Todos)":
     df_f = df_f[df_f["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
 
-# Operador
-op_opts = ["(Todos)"] + sorted(df_f["OPERADOR_NOMBRE"].dropna().astype(str).unique().tolist())
-op_sel = st.sidebar.selectbox("Operador", op_opts, index=0)
 if op_sel != "(Todos)":
     df_f = df_f[df_f["OPERADOR_NOMBRE"].astype(str) == str(op_sel)]
 
-# Turno
-turno_opts = ["(Todos)"] + sorted(df_f["TURNO"].dropna().astype(str).unique().tolist())
-turno_sel = st.sidebar.selectbox("Turno (D/N)", turno_opts, index=0)
 if turno_sel != "(Todos)":
     df_f = df_f[df_f["TURNO"].astype(str) == str(turno_sel)]
 
-st.sidebar.divider()
-
-vista_disp = st.sidebar.radio(
-    "Disponibilidad / MTBF / MTTR basados en:",
-    ["Sistema (TRC+IMP)", "Tractor", "Implemento"],
-    index=0
-)
-
-# =========================================================
-# DATA SELECTION
-# =========================================================
 turnos_sel = df_f.copy()
 ids_turno = set(turnos_sel["ID_TURNO"].astype(str).tolist())
 
@@ -330,7 +317,7 @@ mtbf_hr = (to_base / n_base) if n_base > 0 else np.nan
 disp = ((to_base - dt_base) / to_base) if (to_base and to_base > 0) else np.nan
 
 # =========================================================
-# TITULO Y SUBTITULO (como pediste)
+# TITULOS
 # =========================================================
 st.markdown(
     """
@@ -341,11 +328,10 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-
 st.caption(f"Vista actual de KPIs: **{vista_disp}**")
 
 # =========================================================
-# CARDS (sin cuadros vacíos)
+# CARDS
 # =========================================================
 row1 = st.columns(5)
 with row1[0]:
@@ -373,7 +359,7 @@ with row2[1]:
 st.divider()
 
 # =========================================================
-# TOP 10 POR EQUIPO (panel con borde)
+# TOP 10 POR EQUIPO
 # =========================================================
 st.markdown('<div class="panel">', unsafe_allow_html=True)
 st.subheader("Top 10 por Equipo")
@@ -391,7 +377,6 @@ falla_equipo = ev_fallas_rank.groupby("ID_EQUIPO_AFECTADO", dropna=True).agg(
 
 def build_top_df_sistema():
     imp_ids = turnos_sel["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist()
-
     to_imp_df = to_equipo[to_equipo["TIPO_EQUIPO"] == "IMPLEMENTO"].copy()
     to_imp_df["ID_EQUIPO"] = to_imp_df["ID_EQUIPO"].astype(str)
     to_imp_df = to_imp_df[to_imp_df["ID_EQUIPO"].isin(imp_ids)][["ID_EQUIPO", "TO_HR"]]
@@ -411,7 +396,6 @@ def build_top_df_sistema():
 
 def build_top_df_tractor():
     trc_ids = turnos_sel["ID_TRACTOR"].dropna().astype(str).unique().tolist()
-
     to_trc_df = to_equipo[to_equipo["TIPO_EQUIPO"] == "TRACTOR"].copy()
     to_trc_df["ID_EQUIPO"] = to_trc_df["ID_EQUIPO"].astype(str)
     to_trc_df = to_trc_df[to_trc_df["ID_EQUIPO"].isin(trc_ids)][["ID_EQUIPO", "TO_HR"]]
@@ -428,7 +412,6 @@ def build_top_df_tractor():
 
 def build_top_df_implemento():
     imp_ids = turnos_sel["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist()
-
     to_imp_df = to_equipo[to_equipo["TIPO_EQUIPO"] == "IMPLEMENTO"].copy()
     to_imp_df["ID_EQUIPO"] = to_imp_df["ID_EQUIPO"].astype(str)
     to_imp_df = to_imp_df[to_imp_df["ID_EQUIPO"].isin(imp_ids)][["ID_EQUIPO", "TO_HR"]]
@@ -451,7 +434,6 @@ else:
     top_df = build_top_df_implemento()
 
 colA, colB, colC = st.columns(3)
-
 with colA:
     st.markdown('<div class="panel">', unsafe_allow_html=True)
     st.caption("MTTR alto (peor)")
@@ -474,11 +456,11 @@ with colC:
     st.markdown("</div>", unsafe_allow_html=True)
 
 st.markdown("</div>", unsafe_allow_html=True)
-st.divider()
 
 # =========================================================
 # TOP 10 TÉCNICO
 # =========================================================
+st.divider()
 st.markdown('<div class="panel">', unsafe_allow_html=True)
 st.subheader("Top 10 técnico: SUBSISTEMA / COMPONENTE / PARTE")
 
@@ -488,7 +470,7 @@ if ev_f.empty:
 else:
     ev_f["DT_HR"] = ev_f["DT_MIN"].astype(float) / 60.0
 
-    # Filtro por vista_disp
+    # filtro por vista
     if vista_disp == "Tractor":
         if trc_sel != "(Todos)":
             ev_f = ev_f[ev_f["ID_EQUIPO_AFECTADO"].astype(str) == str(trc_sel)]
@@ -506,12 +488,10 @@ else:
         st.info("No hay fallas en la vista seleccionada para construir el ranking técnico.")
     else:
         fcat = fallas_cat.copy()
-        rename_map = {}
         if "SUB UNIDAD" in fcat.columns:
-            rename_map["SUB UNIDAD"] = "SUBSISTEMA"
+            fcat = fcat.rename(columns={"SUB UNIDAD": "SUBSISTEMA"})
         if "PIEZA" in fcat.columns:
-            rename_map["PIEZA"] = "PARTE"
-        fcat = fcat.rename(columns=rename_map)
+            fcat = fcat.rename(columns={"PIEZA": "PARTE"})
 
         ev_f = ev_f.merge(fcat, on="ID_FALLA", how="left")
 
@@ -524,12 +504,7 @@ else:
 
         to_trac_sel = horo_sel.loc[horo_sel["TIPO_EQUIPO"] == "TRACTOR", "TO_HORO"].sum()
         to_imp_sel  = horo_sel.loc[horo_sel["TIPO_EQUIPO"] == "IMPLEMENTO", "TO_HORO"].sum()
-        if vista_disp == "Tractor":
-            TO_BASE_GLOBAL = to_trac_sel
-        elif vista_disp == "Implemento":
-            TO_BASE_GLOBAL = to_imp_sel
-        else:
-            TO_BASE_GLOBAL = to_imp_sel
+        TO_BASE_GLOBAL = to_imp_sel if vista_disp == "Sistema (TRC+IMP)" else (to_trac_sel if vista_disp == "Tractor" else to_imp_sel)
 
         def rank_group(col_group, titulo):
             if col_group not in ev_f.columns:
@@ -564,8 +539,7 @@ else:
             g = g.sort_values("VALOR", ascending=asc).head(10)
 
             st.markdown('<div class="panel">', unsafe_allow_html=True)
-            fig = px.bar(g, x="VALOR", y=col_group, orientation="h", title=titulo)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(px.bar(g, x="VALOR", y=col_group, orientation="h", title=titulo), use_container_width=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
         c1, c2, c3 = st.columns(3)
