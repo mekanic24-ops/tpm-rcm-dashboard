@@ -37,7 +37,7 @@ def load_tables() -> dict:
         if not p.exists():
             st.error(f"Falta el archivo: {p}")
             st.stop()
-        return pd.read_csv(p, encoding="utf-8-sig")
+        return pd.read_csv(p, encoding="utf-8-sig", low_memory=False)
 
     turnos = r("TURNOS.csv")
     horometros = r("HOROMETROS_TURNO.csv")
@@ -45,17 +45,17 @@ def load_tables() -> dict:
     operadores = r("OPERADORES.csv")
     lotes = r("LOTES.csv")
     fallas_cat = r("FALLAS_CATALOGO.csv")
-    cat_proceso = r("CAT_PROCESO.csv")  # debe venir dentro del ZIP
+    cat_proceso = r("CAT_PROCESO.csv")  # dentro del ZIP
 
     # Tipos
     turnos["FECHA"] = pd.to_datetime(turnos["FECHA"], errors="coerce")
     horometros["TO_HORO"] = pd.to_numeric(horometros["TO_HORO"], errors="coerce")
     eventos["DT_MIN"] = pd.to_numeric(eventos["DT_MIN"], errors="coerce")
 
-    # Normalizar IDs (evitar 1.0)
     def norm_str(s):
         return s.astype(str).str.replace(".0", "", regex=False)
 
+    # Normalizar IDs
     for col in ["ID_TURNO", "ID_TRACTOR", "ID_IMPLEMENTO", "ID_LOTE", "ID_OPERADOR", "ID_PROCESO", "TURNO"]:
         if col in turnos.columns:
             turnos[col] = norm_str(turnos[col])
@@ -71,6 +71,7 @@ def load_tables() -> dict:
     if "ID_FALLA" in fallas_cat.columns:
         fallas_cat["ID_FALLA"] = norm_str(fallas_cat["ID_FALLA"])
 
+    # Cat proceso
     cat_proceso["ID_PROCESO"] = norm_str(cat_proceso["ID_PROCESO"])
     cat_proceso["NOMBRE_PROCESO"] = cat_proceso["NOMBRE_PROCESO"].astype(str)
 
@@ -100,7 +101,7 @@ def build_enriched_turnos(turnos, operadores, lotes):
     return t
 
 def color_span(value_text: str, color_hex: str) -> str:
-    return f"<span style='color:{color_hex}; font-weight:800;'>{value_text}</span>"
+    return f"<span style='color:{color_hex};'>{value_text}</span>"
 
 def mttr_color(v):
     if pd.isna(v): return None
@@ -113,6 +114,37 @@ def mtbf_color(v):
     if v < 100: return "#d62728"      # rojo
     if 100 <= v <= 500: return "#2ca02c"  # verde
     return "#1f77b4"                  # azul
+
+def find_campaign_col(df: pd.DataFrame):
+    for c in ["CAMPAÑA", "CAMPANA", "CAMPAIGN"]:
+        if c in df.columns:
+            return c
+    return None
+
+# =========================================================
+# MINIMAL CSS (solo tipografía/centrado de métricas)
+# =========================================================
+st.markdown(
+    """
+    <style>
+    /* Centrar el bloque de métricas */
+    [data-testid="stMetric"] { text-align: center; }
+    [data-testid="stMetricLabel"]{
+        font-size: 16px !important;
+        font-weight: 800 !important;
+        letter-spacing: 0.2px;
+    }
+    [data-testid="stMetricValue"]{
+        font-size: 40px !important;
+        font-weight: 400 !important; /* sin negrita */
+        line-height: 1.05 !important;
+    }
+    /* Centrar captions debajo */
+    .stCaption { text-align: center; }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 # =========================================================
 # LOAD
@@ -318,36 +350,147 @@ st.caption("INDICADORES DE CONFIABILIDAD - MANTENIBILIDAD - DISPONIBILIDAD")
 st.caption(f"Vista actual de KPIs: **{vista_disp}**")
 
 # =========================================================
-# KPIs (SIN CARDS/CSS)
+# KPIs (FILA 1: TO/DT/FALLAS) centrados
 # =========================================================
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("TO Tractor (h)", f"{to_trac:,.2f}")
-c2.metric("TO Implemento (h)", f"{to_imp:,.2f}")
-c3.metric("Downtime Fallas (h)", f"{dt_base:,.2f}")
-c4.metric("Fallas", f"{n_base:,}")
-c5.metric("Disponibilidad", f"{disp*100:,.2f}%" if pd.notna(disp) else "—")
+r1 = st.columns(4)
+r1[0].metric("TO Tractor (h)", f"{to_trac:,.2f}")
+r1[1].metric("TO Implemento (h)", f"{to_imp:,.2f}")
+r1[2].metric("Downtime Fallas (h)", f"{dt_base:,.2f}")
+r1[3].metric("Fallas", f"{n_base:,}")
 
-c6, c7 = st.columns(2)
+# =========================================================
+# KPIs (FILA 2: MTTR / MTBF / DISPONIBILIDAD)
+# =========================================================
+r2 = st.columns(3)
+
 mttr_txt = f"{mttr_hr:,.2f}" if pd.notna(mttr_hr) else "—"
 mtbf_txt = f"{mtbf_hr:,.2f}" if pd.notna(mtbf_hr) else "—"
+disp_txt = f"{disp*100:,.2f}%" if pd.notna(disp) else "—"
 
-mttr_c = mttr_color(mttr_hr)
-mtbf_c = mtbf_color(mtbf_hr)
-
-with c6:
-    st.markdown("### MTTR (h/falla)")
-    if mttr_c:
-        st.markdown(color_span(mttr_txt, mttr_c), unsafe_allow_html=True)
+# MTTR con color + leyenda
+with r2[0]:
+    col = mttr_color(mttr_hr)
+    if col:
+        st.markdown(f"**MTTR (h/falla)**<br>{color_span(mttr_txt, col)}", unsafe_allow_html=True)
     else:
-        st.markdown(f"**{mttr_txt}**")
+        st.markdown(f"**MTTR (h/falla)**<br>{mttr_txt}", unsafe_allow_html=True)
+    st.caption("Verde <1.2 | Rojo >1.5")
 
-with c7:
-    st.markdown("### MTBF (h/falla)")
-    if mtbf_c:
-        st.markdown(color_span(mtbf_txt, mtbf_c), unsafe_allow_html=True)
+# MTBF con color + leyenda
+with r2[1]:
+    col = mtbf_color(mtbf_hr)
+    if col:
+        st.markdown(f"**MTBF (h/falla)**<br>{color_span(mtbf_txt, col)}", unsafe_allow_html=True)
     else:
-        st.markdown(f"**{mtbf_txt}**")
+        st.markdown(f"**MTBF (h/falla)**<br>{mtbf_txt}", unsafe_allow_html=True)
     st.caption("Rojo <100 | Verde 100–500 | Azul >500")
+
+# DISPONIBILIDAD en la misma fila
+with r2[2]:
+    st.metric("Disponibilidad", disp_txt)
+
+st.divider()
+
+# =========================================================
+# EVOLUCIÓN APLICACIÓN POR CAMPAÑA (MTTR / MTBF)
+# =========================================================
+st.subheader("Evolución del proceso APLICACIÓN por campaña (MTTR y MTBF)")
+
+camp_col = find_campaign_col(turnos)
+if camp_col is None:
+    st.info("No encuentro columna de campaña en TURNOS. Agrega una columna llamada CAMPAÑA o CAMPANA para ver esta evolución.")
+else:
+    # ID del proceso APLICACIÓN desde catálogo
+    cat_tmp = cat_proceso.copy()
+    cat_tmp["NOMBRE_PROCESO_UP"] = cat_tmp["NOMBRE_PROCESO"].astype(str).str.upper().str.strip()
+    id_aplic = cat_tmp.loc[cat_tmp["NOMBRE_PROCESO_UP"] == "APLICACIÓN", "ID_PROCESO"]
+    if id_aplic.empty:
+        # por si viene sin tilde
+        id_aplic = cat_tmp.loc[cat_tmp["NOMBRE_PROCESO_UP"] == "APLICACION", "ID_PROCESO"]
+
+    if id_aplic.empty:
+        st.info("No pude ubicar el proceso APLICACIÓN en CAT_PROCESO.")
+    else:
+        id_aplic = str(id_aplic.iloc[0])
+
+        # Base: respetamos todos tus filtros actuales EXCEPTO proceso,
+        # y forzamos a APLICACIÓN (para ver su evolución real)
+        base = turnos.copy()
+
+        # respetar rango de fechas
+        if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
+            d1 = pd.to_datetime(date_range[0])
+            d2 = pd.to_datetime(date_range[1])
+            base = base[(base["FECHA"] >= d1) & (base["FECHA"] <= d2)]
+
+        # respetar filtros restantes
+        if cult_sel != "(Todos)":
+            base = base[base["CULTIVO"].astype(str) == str(cult_sel)]
+        if trc_sel != "(Todos)":
+            base = base[base["ID_TRACTOR"].astype(str) == str(trc_sel)]
+        if imp_sel != "(Todos)":
+            base = base[base["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
+        if op_sel != "(Todos)":
+            base = base[base["OPERADOR_NOMBRE"].astype(str) == str(op_sel)]
+        if turno_sel != "(Todos)":
+            base = base[base["TURNO"].astype(str) == str(turno_sel)]
+
+        # forzar proceso APLICACIÓN
+        base = base[base["ID_PROCESO"].astype(str) == id_aplic].copy()
+
+        if base.empty:
+            st.info("Con los filtros actuales, no hay turnos del proceso APLICACIÓN.")
+        else:
+            # Horómetros y eventos para esos turnos
+            ids = set(base["ID_TURNO"].astype(str).tolist())
+            h = horometros[horometros["ID_TURNO"].astype(str).isin(ids)].copy()
+            e = eventos[eventos["ID_TURNO"].astype(str).isin(ids)].copy()
+            e = e[e["CATEGORIA_EVENTO"] == "FALLA"].copy()
+            e["DT_HR"] = pd.to_numeric(e["DT_MIN"], errors="coerce") / 60.0
+
+            # Mapeo turno -> campaña
+            turn_campaign = base[["ID_TURNO", camp_col]].copy()
+            turn_campaign["ID_TURNO"] = turn_campaign["ID_TURNO"].astype(str)
+            turn_campaign[camp_col] = turn_campaign[camp_col].astype(str)
+
+            # TO por turno (para base de MTBF/Disponibilidad por campaña)
+            # - Sistema: TO implemento
+            # - Tractor: TO tractor
+            # - Implemento: TO implemento
+            h2 = h.merge(turn_campaign, on="ID_TURNO", how="left")
+
+            if vista_disp == "Tractor":
+                h2 = h2[h2["TIPO_EQUIPO"] == "TRACTOR"].copy()
+            else:
+                h2 = h2[h2["TIPO_EQUIPO"] == "IMPLEMENTO"].copy()
+
+            to_by_campaign = h2.groupby(camp_col, dropna=True)["TO_HORO"].sum().reset_index(name="TO_HR")
+
+            # Downtime y fallas por campaña
+            e2 = e.merge(turn_campaign, on="ID_TURNO", how="left")
+            dt_by_campaign = e2.groupby(camp_col, dropna=True).agg(
+                DT_HR=("DT_HR", "sum"),
+                FALLAS=("DT_HR", "size")
+            ).reset_index()
+
+            evo = to_by_campaign.merge(dt_by_campaign, on=camp_col, how="left").fillna({"DT_HR": 0.0, "FALLAS": 0})
+            evo["MTTR_HR"] = np.where(evo["FALLAS"] > 0, evo["DT_HR"] / evo["FALLAS"], np.nan)
+            evo["MTBF_HR"] = np.where(evo["FALLAS"] > 0, evo["TO_HR"] / evo["FALLAS"], np.nan)
+
+            # Orden por campaña (si viene como "2023-2024" etc, queda ok alfabético; si es numérico también)
+            evo = evo.sort_values(by=camp_col, ascending=True)
+
+            cA, cB = st.columns(2)
+
+            with cA:
+                fig1 = px.bar(evo, x=camp_col, y="MTTR_HR", title="MTTR (h/falla) - APLICACIÓN por campaña")
+                fig1.update_layout(xaxis_title="Campaña", yaxis_title="MTTR (h/falla)", margin=dict(l=20, r=20, t=40, b=20))
+                st.plotly_chart(fig1, width="stretch")
+
+            with cB:
+                fig2 = px.bar(evo, x=camp_col, y="MTBF_HR", title="MTBF (h/falla) - APLICACIÓN por campaña")
+                fig2.update_layout(xaxis_title="Campaña", yaxis_title="MTBF (h/falla)", margin=dict(l=20, r=20, t=40, b=20))
+                st.plotly_chart(fig2, width="stretch")
 
 st.divider()
 
@@ -361,7 +504,7 @@ to_equipo["TO_HR"] = to_equipo["TO_HORO"]
 
 ev_fallas_rank = ev_sel[ev_sel["CATEGORIA_EVENTO"] == "FALLA"].copy()
 if not ev_fallas_rank.empty:
-    ev_fallas_rank["DT_HR"] = ev_fallas_rank["DT_MIN"].astype(float) / 60.0
+    ev_fallas_rank["DT_HR"] = pd.to_numeric(ev_fallas_rank["DT_MIN"], errors="coerce") / 60.0
 else:
     ev_fallas_rank["DT_HR"] = pd.Series(dtype=float)
 
@@ -456,7 +599,7 @@ with colC:
 st.divider()
 
 # =========================================================
-# TOP 10 TÉCNICO (SIN "ISO14224")
+# TOP 10 TÉCNICO
 # =========================================================
 st.subheader("Top 10 técnico: SUBSISTEMA / COMPONENTE / PARTE")
 
@@ -464,7 +607,7 @@ ev_f = ev_sel[ev_sel["CATEGORIA_EVENTO"] == "FALLA"].copy()
 if ev_f.empty:
     st.info("No hay fallas para construir el ranking técnico.")
 else:
-    ev_f["DT_HR"] = ev_f["DT_MIN"].astype(float) / 60.0
+    ev_f["DT_HR"] = pd.to_numeric(ev_f["DT_MIN"], errors="coerce") / 60.0
 
     # filtro por vista
     if vista_disp == "Tractor":
@@ -498,7 +641,6 @@ else:
             key="metrica_tecnica"
         )
 
-        # TO base global (para calcular MTBF/DISP por grupo)
         to_trac_sel = float(horo_sel.loc[horo_sel["TIPO_EQUIPO"] == "TRACTOR", "TO_HORO"].sum())
         to_imp_sel = float(horo_sel.loc[horo_sel["TIPO_EQUIPO"] == "IMPLEMENTO", "TO_HORO"].sum())
         TO_BASE_GLOBAL = to_imp_sel if vista_disp == "Sistema (TRC+IMP)" else (to_trac_sel if vista_disp == "Tractor" else to_imp_sel)
