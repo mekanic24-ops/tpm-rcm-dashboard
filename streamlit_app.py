@@ -113,16 +113,17 @@ st.markdown(
     .kpi-title{ font-size: 12px; opacity: 0.75; margin-bottom: 6px; line-height: 1.1; }
     .kpi-value{ font-size: 30px; font-weight: 780; line-height: 1.05; }
     .kpi-sub{ font-size: 12px; opacity: 0.7; margin-top: 6px; line-height: 1.1; }
-    .panel{
-        border: 2px solid rgba(0,0,0,0.18);
-        border-radius: 14px;
-        padding: 12px 12px 6px 12px;
-        background: rgba(255,255,255,0.02);
-        margin-bottom: 14px;
-    }
+
     .title-wrap{ margin-top: 8px; margin-bottom: 12px; }
     .main-title{ font-size: 46px; font-weight: 900; letter-spacing: 0.5px; margin: 0; line-height: 1.05; }
     .sub-title{ font-size: 18px; opacity: 0.8; margin: 10px 0 0 0; line-height: 1.2; font-weight: 600; }
+
+    /* Redondeo + borde REAL para st.container(border=True) */
+    div[data-testid="stVerticalBlockBorderWrapper"]{
+        border-radius: 14px !important;
+        border: 2px solid rgba(0,0,0,0.18) !important;
+        overflow: hidden !important; /* evita que el gráfico “se salga” visualmente */
+    }
     </style>
     """,
     unsafe_allow_html=True
@@ -169,12 +170,10 @@ cat_proceso = tables["cat_proceso"]
 # =========================================================
 st.sidebar.header("Filtros")
 
-# defaults iniciales
 min_d = turnos["FECHA"].min()
 max_d = turnos["FECHA"].max()
 default_date = (min_d.date() if pd.notna(min_d) else None, max_d.date() if pd.notna(max_d) else None)
 
-# session_state para conservar selección aplicada
 if "applied" not in st.session_state:
     st.session_state.applied = {
         "date_range": default_date,
@@ -187,7 +186,6 @@ if "applied" not in st.session_state:
         "vista_disp": "Sistema (TRC+IMP)",
     }
 
-# Pre-opciones (sin filtrar todavía para evitar re-render)
 proc_map = dict(zip(cat_proceso["ID_PROCESO"], cat_proceso["NOMBRE_PROCESO"]))
 all_proc_ids = sorted(turnos["ID_PROCESO"].dropna().astype(str).unique().tolist())
 proc_labels = ["(Todos)"] + [f"{proc_map.get(pid, 'PROCESO')} [{pid}]" for pid in all_proc_ids]
@@ -201,12 +199,36 @@ turno_opts_all = ["(Todos)"] + sorted(turnos["TURNO"].dropna().astype(str).uniqu
 with st.sidebar.form("filtros_form", clear_on_submit=False):
     date_range = st.date_input("Rango de fechas", value=st.session_state.applied["date_range"])
 
-    proc_label_sel = st.selectbox("Proceso", proc_labels, index=proc_labels.index(st.session_state.applied["proc_label"]) if st.session_state.applied["proc_label"] in proc_labels else 0)
-    cult_sel = st.selectbox("Cultivo", cult_opts_all, index=cult_opts_all.index(st.session_state.applied["cultivo"]) if st.session_state.applied["cultivo"] in cult_opts_all else 0)
-    trc_sel = st.selectbox("Tractor", trc_opts_all, index=trc_opts_all.index(st.session_state.applied["tractor"]) if st.session_state.applied["tractor"] in trc_opts_all else 0)
-    imp_sel = st.selectbox("Implemento", imp_opts_all, index=imp_opts_all.index(st.session_state.applied["implemento"]) if st.session_state.applied["implemento"] in imp_opts_all else 0)
-    op_sel = st.selectbox("Operador", op_opts_all, index=op_opts_all.index(st.session_state.applied["operador"]) if st.session_state.applied["operador"] in op_opts_all else 0)
-    turno_sel = st.selectbox("Turno (D/N)", turno_opts_all, index=turno_opts_all.index(st.session_state.applied["turno"]) if st.session_state.applied["turno"] in turno_opts_all else 0)
+    proc_label_sel = st.selectbox(
+        "Proceso",
+        proc_labels,
+        index=proc_labels.index(st.session_state.applied["proc_label"]) if st.session_state.applied["proc_label"] in proc_labels else 0
+    )
+    cult_sel = st.selectbox(
+        "Cultivo",
+        cult_opts_all,
+        index=cult_opts_all.index(st.session_state.applied["cultivo"]) if st.session_state.applied["cultivo"] in cult_opts_all else 0
+    )
+    trc_sel = st.selectbox(
+        "Tractor",
+        trc_opts_all,
+        index=trc_opts_all.index(st.session_state.applied["tractor"]) if st.session_state.applied["tractor"] in trc_opts_all else 0
+    )
+    imp_sel = st.selectbox(
+        "Implemento",
+        imp_opts_all,
+        index=imp_opts_all.index(st.session_state.applied["implemento"]) if st.session_state.applied["implemento"] in imp_opts_all else 0
+    )
+    op_sel = st.selectbox(
+        "Operador",
+        op_opts_all,
+        index=op_opts_all.index(st.session_state.applied["operador"]) if st.session_state.applied["operador"] in op_opts_all else 0
+    )
+    turno_sel = st.selectbox(
+        "Turno (D/N)",
+        turno_opts_all,
+        index=turno_opts_all.index(st.session_state.applied["turno"]) if st.session_state.applied["turno"] in turno_opts_all else 0
+    )
 
     vista_disp = st.radio(
         "Disponibilidad / MTBF / MTTR basados en:",
@@ -216,7 +238,7 @@ with st.sidebar.form("filtros_form", clear_on_submit=False):
 
     apply_btn = st.form_submit_button("✅ Aplicar filtros")
 
-if apply_btn:
+if apply_btn is True:
     st.session_state.applied = {
         "date_range": date_range,
         "proc_label": proc_label_sel,
@@ -228,7 +250,6 @@ if apply_btn:
         "vista_disp": vista_disp,
     }
 
-# usar SIEMPRE los filtros aplicados
 ap = st.session_state.applied
 date_range = ap["date_range"]
 proc_label_sel = ap["proc_label"]
@@ -240,7 +261,7 @@ turno_sel = ap["turno"]
 vista_disp = ap["vista_disp"]
 
 # =========================================================
-# FILTRADO UNA SOLA VEZ (cuando se aplica)
+# FILTRADO
 # =========================================================
 df_f = turnos.copy()
 
@@ -359,198 +380,204 @@ with row2[1]:
 st.divider()
 
 # =========================================================
-# TOP 10 POR EQUIPO
+# TOP 10 POR EQUIPO (BORDES CORRECTOS)
 # =========================================================
-st.markdown('<div class="panel">', unsafe_allow_html=True)
-st.subheader("Top 10 por Equipo")
+with st.container(border=True):
+    st.subheader("Top 10 por Equipo")
 
-to_equipo = horo_sel.groupby(["TIPO_EQUIPO", "ID_EQUIPO"], dropna=True)["TO_HORO"].sum().reset_index()
-to_equipo["TO_HR"] = to_equipo["TO_HORO"]
+    to_equipo = horo_sel.groupby(["TIPO_EQUIPO", "ID_EQUIPO"], dropna=True)["TO_HORO"].sum().reset_index()
+    to_equipo["TO_HR"] = to_equipo["TO_HORO"]
 
-ev_fallas_rank = ev_sel[ev_sel["CATEGORIA_EVENTO"] == "FALLA"].copy()
-ev_fallas_rank["DT_HR"] = ev_fallas_rank["DT_MIN"].astype(float) / 60.0
+    ev_fallas_rank = ev_sel[ev_sel["CATEGORIA_EVENTO"] == "FALLA"].copy()
+    ev_fallas_rank["DT_HR"] = ev_fallas_rank["DT_MIN"].astype(float) / 60.0
 
-falla_equipo = ev_fallas_rank.groupby("ID_EQUIPO_AFECTADO", dropna=True).agg(
-    DT_FALLA_HR=("DT_HR", "sum"),
-    FALLAS=("DT_HR", "size")
-).reset_index().rename(columns={"ID_EQUIPO_AFECTADO": "ID_EQUIPO"})
-
-def build_top_df_sistema():
-    imp_ids = turnos_sel["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist()
-    to_imp_df = to_equipo[to_equipo["TIPO_EQUIPO"] == "IMPLEMENTO"].copy()
-    to_imp_df["ID_EQUIPO"] = to_imp_df["ID_EQUIPO"].astype(str)
-    to_imp_df = to_imp_df[to_imp_df["ID_EQUIPO"].isin(imp_ids)][["ID_EQUIPO", "TO_HR"]]
-
-    ev_sys = ev_fallas_rank.merge(turnos_sel[["ID_TURNO", "ID_IMPLEMENTO"]], on="ID_TURNO", how="left")
-    ev_sys["ID_IMPLEMENTO"] = ev_sys["ID_IMPLEMENTO"].astype(str)
-    dt_sys_imp = ev_sys.groupby("ID_IMPLEMENTO", dropna=True).agg(
+    falla_equipo = ev_fallas_rank.groupby("ID_EQUIPO_AFECTADO", dropna=True).agg(
         DT_FALLA_HR=("DT_HR", "sum"),
         FALLAS=("DT_HR", "size")
-    ).reset_index().rename(columns={"ID_IMPLEMENTO": "ID_EQUIPO"})
+    ).reset_index().rename(columns={"ID_EQUIPO_AFECTADO": "ID_EQUIPO"})
 
-    top_df = to_imp_df.merge(dt_sys_imp, on="ID_EQUIPO", how="left").fillna({"DT_FALLA_HR": 0.0, "FALLAS": 0})
-    top_df["MTTR_HR"] = np.where(top_df["FALLAS"] > 0, top_df["DT_FALLA_HR"] / top_df["FALLAS"], np.nan)
-    top_df["MTBF_HR"] = np.where(top_df["FALLAS"] > 0, top_df["TO_HR"] / top_df["FALLAS"], np.nan)
-    top_df["DISP"] = np.where(top_df["TO_HR"] > 0, (top_df["TO_HR"] - top_df["DT_FALLA_HR"]) / top_df["TO_HR"], np.nan)
-    return top_df
+    def build_top_df_sistema():
+        imp_ids = turnos_sel["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist()
 
-def build_top_df_tractor():
-    trc_ids = turnos_sel["ID_TRACTOR"].dropna().astype(str).unique().tolist()
-    to_trc_df = to_equipo[to_equipo["TIPO_EQUIPO"] == "TRACTOR"].copy()
-    to_trc_df["ID_EQUIPO"] = to_trc_df["ID_EQUIPO"].astype(str)
-    to_trc_df = to_trc_df[to_trc_df["ID_EQUIPO"].isin(trc_ids)][["ID_EQUIPO", "TO_HR"]]
+        to_imp_df = to_equipo[to_equipo["TIPO_EQUIPO"] == "IMPLEMENTO"].copy()
+        to_imp_df["ID_EQUIPO"] = to_imp_df["ID_EQUIPO"].astype(str)
+        to_imp_df = to_imp_df[to_imp_df["ID_EQUIPO"].isin(imp_ids)][["ID_EQUIPO", "TO_HR"]]
 
-    falla_trc = falla_equipo.copy()
-    falla_trc["ID_EQUIPO"] = falla_trc["ID_EQUIPO"].astype(str)
-    falla_trc = falla_trc[falla_trc["ID_EQUIPO"].isin(trc_ids)]
+        ev_sys = ev_fallas_rank.merge(turnos_sel[["ID_TURNO", "ID_IMPLEMENTO"]], on="ID_TURNO", how="left")
+        ev_sys["ID_IMPLEMENTO"] = ev_sys["ID_IMPLEMENTO"].astype(str)
+        dt_sys_imp = ev_sys.groupby("ID_IMPLEMENTO", dropna=True).agg(
+            DT_FALLA_HR=("DT_HR", "sum"),
+            FALLAS=("DT_HR", "size")
+        ).reset_index().rename(columns={"ID_IMPLEMENTO": "ID_EQUIPO"})
 
-    top_df = to_trc_df.merge(falla_trc, on="ID_EQUIPO", how="left").fillna({"DT_FALLA_HR": 0.0, "FALLAS": 0})
-    top_df["MTTR_HR"] = np.where(top_df["FALLAS"] > 0, top_df["DT_FALLA_HR"] / top_df["FALLAS"], np.nan)
-    top_df["MTBF_HR"] = np.where(top_df["FALLAS"] > 0, top_df["TO_HR"] / top_df["FALLAS"], np.nan)
-    top_df["DISP"] = np.where(top_df["TO_HR"] > 0, (top_df["TO_HR"] - top_df["DT_FALLA_HR"]) / top_df["TO_HR"], np.nan)
-    return top_df
+        top_df = to_imp_df.merge(dt_sys_imp, on="ID_EQUIPO", how="left").fillna({"DT_FALLA_HR": 0.0, "FALLAS": 0})
+        top_df["MTTR_HR"] = np.where(top_df["FALLAS"] > 0, top_df["DT_FALLA_HR"] / top_df["FALLAS"], np.nan)
+        top_df["MTBF_HR"] = np.where(top_df["FALLAS"] > 0, top_df["TO_HR"] / top_df["FALLAS"], np.nan)
+        top_df["DISP"] = np.where(top_df["TO_HR"] > 0, (top_df["TO_HR"] - top_df["DT_FALLA_HR"]) / top_df["TO_HR"], np.nan)
+        return top_df
 
-def build_top_df_implemento():
-    imp_ids = turnos_sel["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist()
-    to_imp_df = to_equipo[to_equipo["TIPO_EQUIPO"] == "IMPLEMENTO"].copy()
-    to_imp_df["ID_EQUIPO"] = to_imp_df["ID_EQUIPO"].astype(str)
-    to_imp_df = to_imp_df[to_imp_df["ID_EQUIPO"].isin(imp_ids)][["ID_EQUIPO", "TO_HR"]]
+    def build_top_df_tractor():
+        trc_ids = turnos_sel["ID_TRACTOR"].dropna().astype(str).unique().tolist()
 
-    falla_imp = falla_equipo.copy()
-    falla_imp["ID_EQUIPO"] = falla_imp["ID_EQUIPO"].astype(str)
-    falla_imp = falla_imp[falla_imp["ID_EQUIPO"].isin(imp_ids)]
+        to_trc_df = to_equipo[to_equipo["TIPO_EQUIPO"] == "TRACTOR"].copy()
+        to_trc_df["ID_EQUIPO"] = to_trc_df["ID_EQUIPO"].astype(str)
+        to_trc_df = to_trc_df[to_trc_df["ID_EQUIPO"].isin(trc_ids)][["ID_EQUIPO", "TO_HR"]]
 
-    top_df = to_imp_df.merge(falla_imp, on="ID_EQUIPO", how="left").fillna({"DT_FALLA_HR": 0.0, "FALLAS": 0})
-    top_df["MTTR_HR"] = np.where(top_df["FALLAS"] > 0, top_df["DT_FALLA_HR"] / top_df["FALLAS"], np.nan)
-    top_df["MTBF_HR"] = np.where(top_df["FALLAS"] > 0, top_df["TO_HR"] / top_df["FALLAS"], np.nan)
-    top_df["DISP"] = np.where(top_df["TO_HR"] > 0, (top_df["TO_HR"] - top_df["DT_FALLA_HR"]) / top_df["TO_HR"], np.nan)
-    return top_df
+        falla_trc = falla_equipo.copy()
+        falla_trc["ID_EQUIPO"] = falla_trc["ID_EQUIPO"].astype(str)
+        falla_trc = falla_trc[falla_trc["ID_EQUIPO"].isin(trc_ids)]
 
-if vista_disp == "Sistema (TRC+IMP)":
-    top_df = build_top_df_sistema()
-elif vista_disp == "Tractor":
-    top_df = build_top_df_tractor()
-else:
-    top_df = build_top_df_implemento()
+        top_df = to_trc_df.merge(falla_trc, on="ID_EQUIPO", how="left").fillna({"DT_FALLA_HR": 0.0, "FALLAS": 0})
+        top_df["MTTR_HR"] = np.where(top_df["FALLAS"] > 0, top_df["DT_FALLA_HR"] / top_df["FALLAS"], np.nan)
+        top_df["MTBF_HR"] = np.where(top_df["FALLAS"] > 0, top_df["TO_HR"] / top_df["FALLAS"], np.nan)
+        top_df["DISP"] = np.where(top_df["TO_HR"] > 0, (top_df["TO_HR"] - top_df["DT_FALLA_HR"]) / top_df["TO_HR"], np.nan)
+        return top_df
 
-colA, colB, colC = st.columns(3)
-with colA:
-    st.markdown('<div class="panel">', unsafe_allow_html=True)
-    st.caption("MTTR alto (peor)")
-    d = top_df.dropna(subset=["MTTR_HR"]).sort_values("MTTR_HR", ascending=False).head(10)
-    st.plotly_chart(px.bar(d, x="MTTR_HR", y="ID_EQUIPO", orientation="h"), use_container_width=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+    def build_top_df_implemento():
+        imp_ids = turnos_sel["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist()
 
-with colB:
-    st.markdown('<div class="panel">', unsafe_allow_html=True)
-    st.caption("MTBF bajo (peor)")
-    d = top_df.dropna(subset=["MTBF_HR"]).sort_values("MTBF_HR", ascending=True).head(10)
-    st.plotly_chart(px.bar(d, x="MTBF_HR", y="ID_EQUIPO", orientation="h"), use_container_width=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+        to_imp_df = to_equipo[to_equipo["TIPO_EQUIPO"] == "IMPLEMENTO"].copy()
+        to_imp_df["ID_EQUIPO"] = to_imp_df["ID_EQUIPO"].astype(str)
+        to_imp_df = to_imp_df[to_imp_df["ID_EQUIPO"].isin(imp_ids)][["ID_EQUIPO", "TO_HR"]]
 
-with colC:
-    st.markdown('<div class="panel">', unsafe_allow_html=True)
-    st.caption("Disponibilidad baja (peor)")
-    d = top_df.dropna(subset=["DISP"]).sort_values("DISP", ascending=True).head(10)
-    st.plotly_chart(px.bar(d, x="DISP", y="ID_EQUIPO", orientation="h"), use_container_width=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+        falla_imp = falla_equipo.copy()
+        falla_imp["ID_EQUIPO"] = falla_imp["ID_EQUIPO"].astype(str)
+        falla_imp = falla_imp[falla_imp["ID_EQUIPO"].isin(imp_ids)]
 
-st.markdown("</div>", unsafe_allow_html=True)
+        top_df = to_imp_df.merge(falla_imp, on="ID_EQUIPO", how="left").fillna({"DT_FALLA_HR": 0.0, "FALLAS": 0})
+        top_df["MTTR_HR"] = np.where(top_df["FALLAS"] > 0, top_df["DT_FALLA_HR"] / top_df["FALLAS"], np.nan)
+        top_df["MTBF_HR"] = np.where(top_df["FALLAS"] > 0, top_df["TO_HR"] / top_df["FALLAS"], np.nan)
+        top_df["DISP"] = np.where(top_df["TO_HR"] > 0, (top_df["TO_HR"] - top_df["DT_FALLA_HR"]) / top_df["TO_HR"], np.nan)
+        return top_df
+
+    if vista_disp == "Sistema (TRC+IMP)":
+        top_df = build_top_df_sistema()
+    elif vista_disp == "Tractor":
+        top_df = build_top_df_tractor()
+    else:
+        top_df = build_top_df_implemento()
+
+    colA, colB, colC = st.columns(3)
+
+    with colA:
+        with st.container(border=True):
+            st.caption("MTTR alto (peor)")
+            d = top_df.dropna(subset=["MTTR_HR"]).sort_values("MTTR_HR", ascending=False).head(10)
+            fig = px.bar(d, x="MTTR_HR", y="ID_EQUIPO", orientation="h")
+            fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig, width="stretch")
+
+    with colB:
+        with st.container(border=True):
+            st.caption("MTBF bajo (peor)")
+            d = top_df.dropna(subset=["MTBF_HR"]).sort_values("MTBF_HR", ascending=True).head(10)
+            fig = px.bar(d, x="MTBF_HR", y="ID_EQUIPO", orientation="h")
+            fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig, width="stretch")
+
+    with colC:
+        with st.container(border=True):
+            st.caption("Disponibilidad baja (peor)")
+            d = top_df.dropna(subset=["DISP"]).sort_values("DISP", ascending=True).head(10)
+            fig = px.bar(d, x="DISP", y="ID_EQUIPO", orientation="h")
+            fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig, width="stretch")
+
+st.divider()
 
 # =========================================================
 # TOP 10 TÉCNICO
 # =========================================================
-st.divider()
-st.markdown('<div class="panel">', unsafe_allow_html=True)
-st.subheader("Top 10 técnico: SUBSISTEMA / COMPONENTE / PARTE")
+with st.container(border=True):
+    st.subheader("Top 10 técnico: SUBSISTEMA / COMPONENTE / PARTE")
 
-ev_f = ev_sel[ev_sel["CATEGORIA_EVENTO"] == "FALLA"].copy()
-if ev_f.empty:
-    st.info("No hay fallas para construir el ranking técnico.")
-else:
-    ev_f["DT_HR"] = ev_f["DT_MIN"].astype(float) / 60.0
-
-    # filtro por vista
-    if vista_disp == "Tractor":
-        if trc_sel != "(Todos)":
-            ev_f = ev_f[ev_f["ID_EQUIPO_AFECTADO"].astype(str) == str(trc_sel)]
-        else:
-            trcs = turnos_sel["ID_TRACTOR"].dropna().astype(str).unique().tolist()
-            ev_f = ev_f[ev_f["ID_EQUIPO_AFECTADO"].astype(str).isin(trcs)]
-    elif vista_disp == "Implemento":
-        if imp_sel != "(Todos)":
-            ev_f = ev_f[ev_f["ID_EQUIPO_AFECTADO"].astype(str) == str(imp_sel)]
-        else:
-            imps = turnos_sel["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist()
-            ev_f = ev_f[ev_f["ID_EQUIPO_AFECTADO"].astype(str).isin(imps)]
-
+    ev_f = ev_sel[ev_sel["CATEGORIA_EVENTO"] == "FALLA"].copy()
     if ev_f.empty:
-        st.info("No hay fallas en la vista seleccionada para construir el ranking técnico.")
+        st.info("No hay fallas para construir el ranking técnico.")
     else:
-        fcat = fallas_cat.copy()
-        if "SUB UNIDAD" in fcat.columns:
-            fcat = fcat.rename(columns={"SUB UNIDAD": "SUBSISTEMA"})
-        if "PIEZA" in fcat.columns:
-            fcat = fcat.rename(columns={"PIEZA": "PARTE"})
+        ev_f["DT_HR"] = ev_f["DT_MIN"].astype(float) / 60.0
 
-        ev_f = ev_f.merge(fcat, on="ID_FALLA", how="left")
-
-        metrica = st.selectbox(
-            "Rankear por",
-            ["Downtime (h)", "# Fallas", "MTTR (h/falla)", "MTBF (h/falla)", "Disponibilidad"],
-            index=0,
-            key="metrica_tecnica"
-        )
-
-        to_trac_sel = horo_sel.loc[horo_sel["TIPO_EQUIPO"] == "TRACTOR", "TO_HORO"].sum()
-        to_imp_sel  = horo_sel.loc[horo_sel["TIPO_EQUIPO"] == "IMPLEMENTO", "TO_HORO"].sum()
-        TO_BASE_GLOBAL = to_imp_sel if vista_disp == "Sistema (TRC+IMP)" else (to_trac_sel if vista_disp == "Tractor" else to_imp_sel)
-
-        def rank_group(col_group, titulo):
-            if col_group not in ev_f.columns:
-                st.info(f"No existe columna **{col_group}** en el catálogo.")
-                return
-
-            tmp = ev_f.dropna(subset=[col_group]).copy()
-            if tmp.empty:
-                st.info(f"No hay datos válidos para **{titulo}**.")
-                return
-
-            g = tmp.groupby(col_group, dropna=True).agg(
-                DT_HR=("DT_HR", "sum"),
-                FALLAS=("DT_HR", "size"),
-            ).reset_index()
-
-            g["MTTR_HR"] = np.where(g["FALLAS"] > 0, g["DT_HR"] / g["FALLAS"], np.nan)
-            g["MTBF_HR"] = np.where(g["FALLAS"] > 0, TO_BASE_GLOBAL / g["FALLAS"], np.nan)
-            g["DISP"]    = np.where(TO_BASE_GLOBAL > 0, (TO_BASE_GLOBAL - g["DT_HR"]) / TO_BASE_GLOBAL, np.nan)
-
-            if metrica == "Downtime (h)":
-                g["VALOR"] = g["DT_HR"]; asc = False
-            elif metrica == "# Fallas":
-                g["VALOR"] = g["FALLAS"]; asc = False
-            elif metrica == "MTTR (h/falla)":
-                g["VALOR"] = g["MTTR_HR"]; asc = False
-            elif metrica == "MTBF (h/falla)":
-                g["VALOR"] = g["MTBF_HR"]; asc = True
+        # filtro por vista
+        if vista_disp == "Tractor":
+            if trc_sel != "(Todos)":
+                ev_f = ev_f[ev_f["ID_EQUIPO_AFECTADO"].astype(str) == str(trc_sel)]
             else:
-                g["VALOR"] = g["DISP"]; asc = True
+                trcs = turnos_sel["ID_TRACTOR"].dropna().astype(str).unique().tolist()
+                ev_f = ev_f[ev_f["ID_EQUIPO_AFECTADO"].astype(str).isin(trcs)]
+        elif vista_disp == "Implemento":
+            if imp_sel != "(Todos)":
+                ev_f = ev_f[ev_f["ID_EQUIPO_AFECTADO"].astype(str) == str(imp_sel)]
+            else:
+                imps = turnos_sel["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist()
+                ev_f = ev_f[ev_f["ID_EQUIPO_AFECTADO"].astype(str).isin(imps)]
 
-            g = g.sort_values("VALOR", ascending=asc).head(10)
+        if ev_f.empty:
+            st.info("No hay fallas en la vista seleccionada para construir el ranking técnico.")
+        else:
+            fcat = fallas_cat.copy()
+            if "SUB UNIDAD" in fcat.columns:
+                fcat = fcat.rename(columns={"SUB UNIDAD": "SUBSISTEMA"})
+            if "PIEZA" in fcat.columns:
+                fcat = fcat.rename(columns={"PIEZA": "PARTE"})
 
-            st.markdown('<div class="panel">', unsafe_allow_html=True)
-            st.plotly_chart(px.bar(g, x="VALOR", y=col_group, orientation="h", title=titulo), use_container_width=True)
-            st.markdown("</div>", unsafe_allow_html=True)
+            ev_f = ev_f.merge(fcat, on="ID_FALLA", how="left")
 
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            rank_group("SUBSISTEMA", "Top 10 por SUBSISTEMA")
-        with c2:
-            rank_group("COMPONENTE", "Top 10 por COMPONENTE")
-        with c3:
-            rank_group("PARTE", "Top 10 por PARTE")
+            metrica = st.selectbox(
+                "Rankear por",
+                ["Downtime (h)", "# Fallas", "MTTR (h/falla)", "MTBF (h/falla)", "Disponibilidad"],
+                index=0,
+                key="metrica_tecnica"
+            )
 
-st.markdown("</div>", unsafe_allow_html=True)
+            to_trac_sel = horo_sel.loc[horo_sel["TIPO_EQUIPO"] == "TRACTOR", "TO_HORO"].sum()
+            to_imp_sel  = horo_sel.loc[horo_sel["TIPO_EQUIPO"] == "IMPLEMENTO", "TO_HORO"].sum()
+            TO_BASE_GLOBAL = to_imp_sel if vista_disp == "Sistema (TRC+IMP)" else (to_trac_sel if vista_disp == "Tractor" else to_imp_sel)
+
+            def rank_group(col_group, titulo):
+                if col_group not in ev_f.columns:
+                    st.info(f"No existe columna **{col_group}** en el catálogo.")
+                    return
+
+                tmp = ev_f.dropna(subset=[col_group]).copy()
+                if tmp.empty:
+                    st.info(f"No hay datos válidos para **{titulo}**.")
+                    return
+
+                g = tmp.groupby(col_group, dropna=True).agg(
+                    DT_HR=("DT_HR", "sum"),
+                    FALLAS=("DT_HR", "size"),
+                ).reset_index()
+
+                g["MTTR_HR"] = np.where(g["FALLAS"] > 0, g["DT_HR"] / g["FALLAS"], np.nan)
+                g["MTBF_HR"] = np.where(g["FALLAS"] > 0, TO_BASE_GLOBAL / g["FALLAS"], np.nan)
+                g["DISP"]    = np.where(TO_BASE_GLOBAL > 0, (TO_BASE_GLOBAL - g["DT_HR"]) / TO_BASE_GLOBAL, np.nan)
+
+                if metrica == "Downtime (h)":
+                    g["VALOR"] = g["DT_HR"]; asc = False
+                elif metrica == "# Fallas":
+                    g["VALOR"] = g["FALLAS"]; asc = False
+                elif metrica == "MTTR (h/falla)":
+                    g["VALOR"] = g["MTTR_HR"]; asc = False
+                elif metrica == "MTBF (h/falla)":
+                    g["VALOR"] = g["MTBF_HR"]; asc = True
+                else:
+                    g["VALOR"] = g["DISP"]; asc = True
+
+                g = g.sort_values("VALOR", ascending=asc).head(10)
+                fig = px.bar(g, x="VALOR", y=col_group, orientation="h")
+                fig.update_layout(title=titulo, margin=dict(l=10, r=10, t=30, b=10))
+                st.plotly_chart(fig, width="stretch")
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                with st.container(border=True):
+                    rank_group("SUBSISTEMA", "Top 10 por SUBSISTEMA")
+            with c2:
+                with st.container(border=True):
+                    rank_group("COMPONENTE", "Top 10 por COMPONENTE")
+            with c3:
+                with st.container(border=True):
+                    rank_group("PARTE", "Top 10 por PARTE")
 
 # =========================================================
 # DESCARGAS
@@ -573,6 +600,6 @@ st.download_button(
 st.download_button(
     "Descargar EVENTOS filtrado (CSV)",
     data=ev_sel.to_csv(index=False).encode("utf-8-sig"),
-    file_name="EVENTOS_TURNO_filtrado.csv",
+    file_name="EVENTOS_filtrado.csv",
     mime="text/csv",
 )
