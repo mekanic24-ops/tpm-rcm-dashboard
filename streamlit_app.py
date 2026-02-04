@@ -738,7 +738,11 @@ else:
 
 top_df["MTTR_HR"] = np.where(top_df["FALLAS"] > 0, top_df["DT_FALLA_HR"] / top_df["FALLAS"], np.nan)
 top_df["MTBF_HR"] = np.where(top_df["FALLAS"] > 0, top_df["TO_HR"] / top_df["FALLAS"], np.nan)
-top_df["DISP"] = np.where(top_df["TO_HR"] > 0, (top_df["TO_HR"] - top_df["DT_FALLA_HR"]) / top_df["TO_HR"], np.nan)
+top_df["DISP"] = np.where(
+    (top_df["TO_HR"] + top_df["DT_FALLA_HR"]) > 0,
+    top_df["TO_HR"] / (top_df["TO_HR"] + top_df["DT_FALLA_HR"]),
+    np.nan
+)
 
 colA, colB, colC = st.columns(3)
 with colA:
