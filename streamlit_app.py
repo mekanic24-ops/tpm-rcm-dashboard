@@ -458,7 +458,9 @@ n_base = int(len(ev_base)) if not ev_base.empty else 0
 
 mttr_hr = (dt_base / n_base) if n_base > 0 else np.nan
 mtbf_hr = (to_base / n_base) if n_base > 0 else np.nan
-disp = ((to_base - dt_base) / to_base) if (to_base and to_base > 0) else np.nan
+
+# NUEVA FORMULA DE DISPONIBILIDAD
+disp = (to_base / (to_base + dt_base)) if (to_base is not None and (to_base + dt_base) > 0) else np.nan
 
 # =========================================================
 # TITULOS
