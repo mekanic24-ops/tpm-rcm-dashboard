@@ -1,6 +1,7 @@
+# streamlit_app.py
 import zipfile
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, List, Dict
 
 import numpy as np
 import pandas as pd
@@ -16,6 +17,7 @@ st.set_page_config(page_title="DESEMPEÑO OPERACIONAL DE LA FLOTA", layout="wide
 ZIP_NAME = "TPM_modelo_normalizado_CSV.zip"
 DATA_DIR = Path("data_normalizada")
 
+
 # =========================================================
 # HELPERS
 # =========================================================
@@ -29,6 +31,7 @@ def ensure_data_unzipped():
         st.stop()
     with zipfile.ZipFile(zip_path, "r") as z:
         z.extractall(DATA_DIR)
+
 
 @st.cache_data(show_spinner=False)
 def load_tables() -> dict:
@@ -46,7 +49,14 @@ def load_tables() -> dict:
     eventos = r("EVENTOS_TURNO.csv")
     operadores = r("OPERADORES.csv")
     lotes = r("LOTES.csv")
+    fallas_cat = r("FALLAS_CATALOGO.csv")
     cat_proceso = r("CAT_PROCESO.csv")
+
+    # NUEVO: fallas detalle técnico (desde tu hoja FALLA)
+    fallas_detalle = None
+    p_det = DATA_DIR / "FALLAS_DETALLE_NORMALIZADO.csv"
+    if p_det.exists():
+        fallas_detalle = pd.read_csv(p_det, encoding="utf-8-sig", low_memory=False)
 
     # Tipos base
     turnos["FECHA"] = pd.to_datetime(turnos["FECHA"], errors="coerce")
@@ -56,6 +66,7 @@ def load_tables() -> dict:
     def norm_str(s: pd.Series) -> pd.Series:
         return s.astype(str).str.replace(".0", "", regex=False).str.strip()
 
+    # Normalización IDs comunes
     for col in ["ID_TURNO", "ID_TRACTOR", "ID_IMPLEMENTO", "ID_LOTE", "ID_OPERADOR", "ID_PROCESO", "TURNO"]:
         if col in turnos.columns:
             turnos[col] = norm_str(turnos[col])
@@ -64,9 +75,12 @@ def load_tables() -> dict:
         if col in horometros.columns:
             horometros[col] = norm_str(horometros[col])
 
-    for col in ["ID_TURNO", "CATEGORIA_EVENTO", "ID_EQUIPO_AFECTADO"]:
+    for col in ["ID_TURNO", "CATEGORIA_EVENTO", "ID_EQUIPO_AFECTADO", "ID_FALLA"]:
         if col in eventos.columns:
             eventos[col] = norm_str(eventos[col])
+
+    if "ID_FALLA" in fallas_cat.columns:
+        fallas_cat["ID_FALLA"] = norm_str(fallas_cat["ID_FALLA"])
 
     cat_proceso["ID_PROCESO"] = norm_str(cat_proceso["ID_PROCESO"])
     cat_proceso["NOMBRE_PROCESO"] = cat_proceso["NOMBRE_PROCESO"].astype(str).str.strip()
@@ -77,14 +91,31 @@ def load_tables() -> dict:
     lotes["ID_LOTE"] = norm_str(lotes["ID_LOTE"])
     lotes["CULTIVO"] = lotes["CULTIVO"].astype(str)
 
+    # FALLAS_DETALLE_NORMALIZADO: normaliza columnas clave si existe
+    if fallas_detalle is not None:
+        # nombres esperados (según el archivo que generamos)
+        # EQUIPO, SUBUNIDAD, COMPONENTE, PARTE, VERBO_TECNICO, CAUSA_FALLA, DOWNTIME_HR
+        # y debe traer ID_TURNO
+        if "ID_TURNO" in fallas_detalle.columns:
+            fallas_detalle["ID_TURNO"] = norm_str(fallas_detalle["ID_TURNO"])
+        if "EQUIPO" in fallas_detalle.columns:
+            fallas_detalle["EQUIPO"] = norm_str(fallas_detalle["EQUIPO"])
+        if "TIPO_EQUIPO" in fallas_detalle.columns:
+            fallas_detalle["TIPO_EQUIPO"] = norm_str(fallas_detalle["TIPO_EQUIPO"])
+        if "DOWNTIME_HR" in fallas_detalle.columns:
+            fallas_detalle["DOWNTIME_HR"] = pd.to_numeric(fallas_detalle["DOWNTIME_HR"], errors="coerce")
+
     return {
         "turnos": turnos,
         "horometros": horometros,
         "eventos": eventos,
         "operadores": operadores,
         "lotes": lotes,
+        "fallas_cat": fallas_cat,
         "cat_proceso": cat_proceso,
+        "fallas_detalle": fallas_detalle,
     }
+
 
 def normalize_cultivo(x) -> Optional[str]:
     if x is None or (isinstance(x, float) and np.isnan(x)):
@@ -93,9 +124,24 @@ def normalize_cultivo(x) -> Optional[str]:
     s = s.replace("Á", "A").replace("É", "E").replace("Í", "I").replace("Ó", "O").replace("Ú", "U")
     if s in ["PALTA", "PALTO"]:
         return "PALTO"
-    if s in ["ARANDANO", "ARANDANO "]:
+    if s in ["ARANDANO", "ARÁNDANO"]:
         return "ARANDANO"
     return s
+
+
+def normalize_turno(x) -> Optional[str]:
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return None
+    s = str(x).strip().upper()
+    s = s.replace("Á", "A").replace("É", "E").replace("Í", "I").replace("Ó", "O").replace("Ú", "U")
+    if s in ["D", "DIA", "DÍA", "DAY"]:
+        return "DIA"
+    if s in ["N", "NOCHE", "NIGHT"]:
+        return "NOCHE"
+    if s in ["(TODOS)", "TODOS"]:
+        return None
+    return s
+
 
 def build_enriched_turnos(turnos, operadores, lotes):
     t = turnos.copy()
@@ -105,9 +151,18 @@ def build_enriched_turnos(turnos, operadores, lotes):
     lote_map = dict(zip(lotes["ID_LOTE"], lotes["CULTIVO"]))
     t["CULTIVO"] = t["ID_LOTE"].map(lote_map)
     t["CULTIVO"] = t["CULTIVO"].apply(normalize_cultivo)
+
+    # normalizar turno para botones
+    if "TURNO" in t.columns:
+        t["TURNO_NORM"] = t["TURNO"].apply(normalize_turno)
+    else:
+        t["TURNO_NORM"] = None
+
     return t
 
+
 def mttr_color_3(v):
+    """<1.2 azul | 1.2-2.5 verde | >2.5 rojo"""
     if v is None or pd.isna(v):
         return None
     if v < 1.2:
@@ -116,34 +171,40 @@ def mttr_color_3(v):
         return "#2ca02c"  # verde
     return "#d62728"      # rojo
 
+
 def mtbf_color(v):
     if v is None or pd.isna(v):
         return None
     if v < 100:
-        return "#d62728"
+        return "#d62728"  # rojo
     if 100 <= v <= 500:
-        return "#2ca02c"
-    return "#1f77b4"
+        return "#2ca02c"  # verde
+    return "#1f77b4"      # azul
+
 
 def disp_color(d):
+    """d viene como ratio 0-1"""
     if d is None or pd.isna(d):
         return None
     p = d * 100
     if p < 90:
-        return "#d62728"
+        return "#d62728"   # rojo
     if p <= 95:
-        return "#2ca02c"
-    return "#1f77b4"
+        return "#2ca02c"   # verde
+    return "#1f77b4"       # azul
+
 
 def fmt_num(x, dec=2):
     if x is None or pd.isna(x):
         return "—"
     return f"{x:,.{dec}f}"
 
+
 def fmt_pct(x, dec=2):
     if x is None or pd.isna(x):
         return "—"
     return f"{x*100:,.{dec}f}%"
+
 
 def kpi_card_html(title: str, value: str, color: Optional[str] = None, hint: Optional[str] = None) -> str:
     val_style = "color:#111;"
@@ -157,6 +218,7 @@ def kpi_card_html(title: str, value: str, color: Optional[str] = None, hint: Opt
         <div class="kpi-hint">{hint_text}</div>
       </div>
     """
+
 
 def render_kpi_row(cards_html: List[str], big: bool = False):
     row_class = "kpi-row big" if big else "kpi-row"
@@ -218,26 +280,10 @@ def render_kpi_row(cards_html: List[str], big: bool = False):
     height = 185 if big else 175
     components.html(html, height=height)
 
-def section_title_center(text: str):
-    st.markdown(
-        f"<div style='text-align:center;font-size:18px;font-weight:900;margin:0 0 6px 0'>{text}</div>",
-        unsafe_allow_html=True
-    )
 
-def nice_process_name(s: str) -> str:
-    # "APLICACIÓN" -> "Aplicación"
-    s = (s or "").strip()
-    if not s:
-        return s
-    return s.lower().capitalize()
+def center_title(txt: str) -> str:
+    return f"<div style='text-align:center;font-weight:800;font-size:18px;margin:0 0 4px 0;'>{txt}</div>"
 
-def find_first_existing_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-    cols_upper = {c.upper(): c for c in df.columns}
-    for cand in candidates:
-        key = cand.upper()
-        if key in cols_upper:
-            return cols_upper[key]
-    return None
 
 # =========================================================
 # LOAD
@@ -247,137 +293,130 @@ turnos = build_enriched_turnos(tables["turnos"], tables["operadores"], tables["l
 horometros = tables["horometros"]
 eventos = tables["eventos"]
 cat_proceso = tables["cat_proceso"]
+fallas_detalle = tables["fallas_detalle"]  # puede ser None
+
+proc_map: Dict[str, str] = dict(
+    zip(cat_proceso["ID_PROCESO"].astype(str), cat_proceso["NOMBRE_PROCESO"].astype(str))
+)
 
 # =========================================================
-# SIDEBAR FILTERS (INTERACTIVO)
+# SIDEBAR FILTERS (INTERACTIVO + BOTONES)
 # =========================================================
 st.sidebar.header("Filtros")
 
-# ---- Fecha
 min_d = turnos["FECHA"].min()
 max_d = turnos["FECHA"].max()
 date_range = st.sidebar.date_input(
     "Rango de fechas",
     value=(min_d.date() if pd.notna(min_d) else None, max_d.date() if pd.notna(max_d) else None),
-    key="f_date_range",
+    key="date_range",
 )
 
+# Base por fechas
 df_base = turnos.copy()
 if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
     d1 = pd.to_datetime(date_range[0])
     d2 = pd.to_datetime(date_range[1])
     df_base = df_base[(df_base["FECHA"] >= d1) & (df_base["FECHA"] <= d2)]
 
-# ---- Cultivo (BOTONES)
-cult_options = ["(Todos)", "Palto", "Arandano"]
-cult_sel_label = st.sidebar.radio("Cultivo", cult_options, index=0, key="f_cultivo_radio")
-cult_sel = "(Todos)"
-if cult_sel_label != "(Todos)":
-    cult_sel = "PALTO" if cult_sel_label == "Palto" else "ARANDANO"
-    df_base = df_base[df_base["CULTIVO"] == cult_sel]
-
-# ---- Tractor (desplegable se mantiene)
-trc_opts = ["(Todos)"] + sorted(df_base["ID_TRACTOR"].dropna().astype(str).unique().tolist())
-trc_sel = st.sidebar.selectbox("Tractor", trc_opts, index=0, key="f_trc_sel")
+# --- Cultivo (botones) ---
+cult_label_to_val = {"(Todos)": None, "Palto": "PALTO", "Arandano": "ARANDANO"}
+cult_choice = st.sidebar.radio("Cultivo", ["(Todos)", "Palto", "Arandano"], index=0, key="cult_btn")
+cult_sel = cult_label_to_val[cult_choice]
 df_tmp = df_base.copy()
+if cult_sel:
+    df_tmp = df_tmp[df_tmp["CULTIVO"] == cult_sel]
+
+# --- Turno (botones) ---
+turn_label_to_val = {"(Todos)": None, "Día": "DIA", "Noche": "NOCHE"}
+turn_choice = st.sidebar.radio("Turno", ["(Todos)", "Día", "Noche"], index=0, key="turn_btn")
+turn_sel = turn_label_to_val[turn_choice]
+if turn_sel:
+    df_tmp = df_tmp[df_tmp["TURNO_NORM"] == turn_sel]
+
+# --- Tractor / Implemento (desplegables) ---
+trc_opts = ["(Todos)"] + sorted(df_tmp["ID_TRACTOR"].dropna().astype(str).unique().tolist())
+trc_sel = st.sidebar.selectbox("Tractor", trc_opts, index=0, key="trc_sel")
 if trc_sel != "(Todos)":
     df_tmp = df_tmp[df_tmp["ID_TRACTOR"].astype(str) == str(trc_sel)]
 
-# ---- Implemento (desplegable se mantiene)
 imp_opts = ["(Todos)"] + sorted(df_tmp["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist())
-imp_sel = st.sidebar.selectbox("Implemento", imp_opts, index=0, key="f_imp_sel")
+imp_sel = st.sidebar.selectbox("Implemento", imp_opts, index=0, key="imp_sel")
 if imp_sel != "(Todos)":
     df_tmp = df_tmp[df_tmp["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
 
-# ---- Turno (BOTONES)
-# Valores reales suelen ser "D" / "N", pero tu data también podría traer "DIA"/"NOCHE".
-# Aquí filtramos por contiene (robusto).
-turno_options = ["(Todos)", "Día", "Noche"]
-turno_sel_label = st.sidebar.radio("Turno (D/N)", turno_options, index=0, key="f_turno_radio")
-if turno_sel_label != "(Todos)":
-    val = "D" if turno_sel_label == "Día" else "N"
-    df_tmp = df_tmp[df_tmp["TURNO"].astype(str).str.upper().str.startswith(val)]
+# --- Proceso (botones ordenados por TO del implemento) ---
+# Construimos ranking TO del implemento por proceso (con filtros base ya aplicados: fecha/cultivo/turno/tractor/implemento)
+ids_for_rank = set(df_tmp["ID_TURNO"].astype(str).tolist())
+h_rank = horometros[horometros["ID_TURNO"].astype(str).isin(ids_for_rank)].copy()
+h_rank = h_rank[h_rank["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
 
-# =========================================================
-# PROCESO COMO BOTONES, ORDENADO POR TO (IMPLEMENTO)
-# (calculado con filtros previos ya aplicados, pero SIN filtrar por proceso)
-# =========================================================
-proc_map_id_to_name = dict(zip(cat_proceso["ID_PROCESO"].astype(str), cat_proceso["NOMBRE_PROCESO"].astype(str)))
+# Necesitamos ID_PROCESO por turno
+turn_proc = df_tmp[["ID_TURNO", "ID_PROCESO"]].copy()
+turn_proc["ID_TURNO"] = turn_proc["ID_TURNO"].astype(str)
 
-# Turnos "previos" (ya con fecha/cultivo/tractor/implemento/turno)
-turnos_prev = df_tmp.copy()
-ids_prev = set(turnos_prev["ID_TURNO"].astype(str).tolist())
+h_rank = h_rank.merge(turn_proc, on="ID_TURNO", how="left")
+to_by_proc = (
+    h_rank.groupby("ID_PROCESO", dropna=True)["TO_HORO"].sum()
+    .sort_values(ascending=False)
+)
 
-h_prev = horometros[horometros["ID_TURNO"].astype(str).isin(ids_prev)].copy()
-h_prev_imp = h_prev[h_prev["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
+proc_ids_ordered = [str(x) for x in to_by_proc.index.astype(str).tolist()]
+proc_names_ordered = [proc_map.get(pid, f"Proceso {pid}") for pid in proc_ids_ordered]
 
-# sum TO implemento por proceso
-if not h_prev_imp.empty and not turnos_prev.empty:
-    aux = h_prev_imp.merge(turnos_prev[["ID_TURNO", "ID_PROCESO"]], on="ID_TURNO", how="left")
-    to_proc = aux.groupby("ID_PROCESO", dropna=True)["TO_HORO"].sum().reset_index(name="TO_IMP_HR")
-else:
-    to_proc = pd.DataFrame(columns=["ID_PROCESO", "TO_IMP_HR"])
+proc_options = ["(Todos)"] + proc_names_ordered
 
-to_proc["ID_PROCESO"] = to_proc["ID_PROCESO"].astype(str)
-to_proc = to_proc.sort_values("TO_IMP_HR", ascending=False)
+# Mantener selección si ya existe
+prev_proc = st.session_state.get("proc_btn", "(Todos)")
+if prev_proc not in proc_options:
+    prev_proc = "(Todos)"
 
-# lista de nombres (solo nombre, sin [id])
-proc_names_ordered = []
-proc_name_to_id = {}
-for _, r in to_proc.iterrows():
-    pid = str(r["ID_PROCESO"])
-    pname_raw = proc_map_id_to_name.get(pid, "PROCESO")
-    pname = nice_process_name(pname_raw)
-    # si hay duplicados de nombre, nos quedamos con el que tenga más TO
-    if pname not in proc_name_to_id:
-        proc_name_to_id[pname] = pid
-        proc_names_ordered.append(pname)
+proc_name_sel = st.sidebar.radio("Proceso (ordenado por TO)", proc_options, index=proc_options.index(prev_proc), key="proc_btn")
 
-# incluir procesos que existen en los turnos previos pero con TO 0 (por si no hay horómetros)
-if proc_names_ordered:
-    pass
-else:
-    # fallback: por catálogo
-    uniq_ids = sorted(turnos_prev["ID_PROCESO"].dropna().astype(str).unique().tolist())
-    for pid in uniq_ids:
-        pname = nice_process_name(proc_map_id_to_name.get(pid, "PROCESO"))
-        if pname not in proc_name_to_id:
-            proc_name_to_id[pname] = pid
-            proc_names_ordered.append(pname)
-
-proc_radio_opts = ["(Todos)"] + proc_names_ordered
-proc_sel_name = st.sidebar.radio("Proceso (ordenado por TO implemento)", proc_radio_opts, index=0, key="f_proc_radio")
-
+# Aplicar filtro proceso
+df_f = df_tmp.copy()
 id_proceso_sel = None
-turnos_sel = turnos_prev.copy()
-if proc_sel_name != "(Todos)":
-    id_proceso_sel = proc_name_to_id.get(proc_sel_name)
+if proc_name_sel != "(Todos)":
+    # buscar ID_PROCESO por nombre (mapeo inverso) dentro del orden actual
+    name_to_id = {proc_map.get(pid, f"Proceso {pid}"): pid for pid in proc_ids_ordered}
+    id_proceso_sel = name_to_id.get(proc_name_sel)
     if id_proceso_sel is not None:
-        turnos_sel = turnos_sel[turnos_sel["ID_PROCESO"].astype(str) == str(id_proceso_sel)]
+        df_f = df_f[df_f["ID_PROCESO"].astype(str) == str(id_proceso_sel)]
 
-# =========================================================
-# VISTA KPI
-# =========================================================
+# --- Vista de KPIs ---
 vista_disp = st.sidebar.radio(
-    "Disponibilidad / MTBF / MTTR basados en:",
+    "KPIs basados en:",
     ["Sistema (TRC+IMP)", "Tractor", "Implemento"],
     index=0,
-    key="f_vista_disp",
+    key="vista_disp",
 )
 
 # =========================================================
 # SELECCIÓN FINAL
 # =========================================================
+turnos_sel = df_f.copy()
 ids_turno = set(turnos_sel["ID_TURNO"].astype(str).tolist())
+
 horo_sel = horometros[horometros["ID_TURNO"].astype(str).isin(ids_turno)].copy()
 ev_sel = eventos[eventos["ID_TURNO"].astype(str).isin(ids_turno)].copy()
+
+# Fallas detalle técnico (si existe)
+fd_sel = None
+if fallas_detalle is not None:
+    if "ID_TURNO" in fallas_detalle.columns:
+        fd_sel = fallas_detalle[fallas_detalle["ID_TURNO"].astype(str).isin(ids_turno)].copy()
+    else:
+        fd_sel = fallas_detalle.copy()
+
 
 # =========================================================
 # KPI GLOBAL
 # =========================================================
+# TO por tipo
 to_trac = float(horo_sel.loc[horo_sel["TIPO_EQUIPO"].astype(str).str.upper() == "TRACTOR", "TO_HORO"].sum())
 to_imp = float(horo_sel.loc[horo_sel["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO", "TO_HORO"].sum())
 
+# Fallas desde EVENTOS_TURNO (para KPI macro)
 ev_fallas = ev_sel[ev_sel["CATEGORIA_EVENTO"].astype(str).str.upper() == "FALLA"].copy()
 if not ev_fallas.empty:
     ev_fallas["DT_HR"] = pd.to_numeric(ev_fallas["DT_MIN"], errors="coerce") / 60.0
@@ -387,13 +426,15 @@ else:
 def fallas_de_equipo(cod_equipo: str):
     return ev_fallas[ev_fallas["ID_EQUIPO_AFECTADO"].astype(str) == str(cod_equipo)]
 
+# Base TO y DT según vista (y evitar negativos / incoherencias)
 if vista_disp == "Sistema (TRC+IMP)":
-    to_base = to_imp
-    dt_base = float(ev_fallas["DT_HR"].sum())
+    # TO base: IMPLEMENTO (operación neta)
+    to_base = max(to_imp, 0.0)
+    dt_base = float(ev_fallas["DT_HR"].sum()) if not ev_fallas.empty else 0.0
     n_base = int(len(ev_fallas))
 
 elif vista_disp == "Tractor":
-    to_base = to_trac
+    to_base = max(to_trac, 0.0)
     if trc_sel != "(Todos)":
         ev_b = fallas_de_equipo(trc_sel)
     else:
@@ -403,7 +444,7 @@ elif vista_disp == "Tractor":
     n_base = int(len(ev_b))
 
 else:  # Implemento
-    to_base = to_imp
+    to_base = max(to_imp, 0.0)
     if imp_sel != "(Todos)":
         ev_b = fallas_de_equipo(imp_sel)
     else:
@@ -415,8 +456,9 @@ else:  # Implemento
 mttr_hr = (dt_base / n_base) if n_base > 0 else np.nan
 mtbf_hr = (to_base / n_base) if n_base > 0 else np.nan
 
-# ✅ DISP nueva: TO / (TO + DT)
+# Disponibilidad: TO / (TO + DT)
 disp = (to_base / (to_base + dt_base)) if (to_base is not None and (to_base + dt_base) > 0) else np.nan
+
 
 # =========================================================
 # TITULOS
@@ -429,7 +471,7 @@ st.caption(f"Vista actual de KPIs: **{vista_disp}**")
 # KPIs (6 cards: 3 arriba + 3 abajo)
 # =========================================================
 row1 = [
-    kpi_card_html("Tiempo de Operación (h)", fmt_num(to_imp)),
+    kpi_card_html("Tiempo de Operación (h)", fmt_num(to_base)),
     kpi_card_html("Downtime Fallas (h)", fmt_num(dt_base)),
     kpi_card_html("Fallas", f"{n_base:,}"),
 ]
@@ -460,272 +502,283 @@ render_kpi_row(row2, big=True)
 st.divider()
 
 # =========================================================
-# TOP 10 DE EQUIPOS: TO, DT, FALLAS (NO SOLO IMPLEMENTOS)
-# =========================================================
-st.subheader("Top 10 de equipos: TO, Downtime y Fallas")
-
-trc_ids = turnos_sel["ID_TRACTOR"].dropna().astype(str).unique().tolist()
-imp_ids = turnos_sel["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist()
-
-if vista_disp == "Tractor":
-    equipos_ids = sorted(list(set(trc_ids)))
-elif vista_disp == "Implemento":
-    equipos_ids = sorted(list(set(imp_ids)))
-else:
-    equipos_ids = sorted(list(set(trc_ids + imp_ids)))
-
-# TO por equipo según vista
-h_to = horo_sel.copy()
-if vista_disp == "Tractor":
-    h_to = h_to[h_to["TIPO_EQUIPO"].astype(str).str.upper() == "TRACTOR"]
-elif vista_disp == "Implemento":
-    h_to = h_to[h_to["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"]
-# Sistema: ambos
-
-to_eq = (
-    h_to[h_to["ID_EQUIPO"].astype(str).isin(equipos_ids)]
-    .groupby("ID_EQUIPO", dropna=True)["TO_HORO"].sum()
-    .reset_index(name="TO_HR")
-)
-
-# DT y fallas por equipo
-ev_f = ev_sel[ev_sel["CATEGORIA_EVENTO"].astype(str).str.upper() == "FALLA"].copy()
-if not ev_f.empty:
-    ev_f["DT_HR"] = pd.to_numeric(ev_f["DT_MIN"], errors="coerce") / 60.0
-else:
-    ev_f["DT_HR"] = pd.Series(dtype=float)
-
-dt_eq = (
-    ev_f[ev_f["ID_EQUIPO_AFECTADO"].astype(str).isin(equipos_ids)]
-    .groupby("ID_EQUIPO_AFECTADO", dropna=True)
-    .agg(DT_HR=("DT_HR", "sum"), FALLAS=("DT_HR", "size"))
-    .reset_index()
-    .rename(columns={"ID_EQUIPO_AFECTADO": "ID_EQUIPO"})
-)
-
-op_eq = to_eq.merge(dt_eq, on="ID_EQUIPO", how="left").fillna({"DT_HR": 0.0, "FALLAS": 0})
-
-c1, c2, c3 = st.columns(3)
-with c1:
-    section_title_center("Top 10 por TO (h)")
-    d = op_eq.sort_values("TO_HR", ascending=False).head(10)
-    fig = px.bar(d, x="TO_HR", y="ID_EQUIPO", orientation="h")
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), xaxis_title="TO (h)", yaxis_title="Equipo")
-    st.plotly_chart(fig, use_container_width=True)
-
-with c2:
-    section_title_center("Top 10 por Downtime (h)")
-    d = op_eq.sort_values("DT_HR", ascending=False).head(10)
-    fig = px.bar(d, x="DT_HR", y="ID_EQUIPO", orientation="h")
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Downtime (h)", yaxis_title="Equipo")
-    st.plotly_chart(fig, use_container_width=True)
-
-with c3:
-    section_title_center("Top 10 por Fallas (n)")
-    d = op_eq.sort_values("FALLAS", ascending=False).head(10)
-    fig = px.bar(d, x="FALLAS", y="ID_EQUIPO", orientation="h")
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Fallas (n)", yaxis_title="Equipo")
-    st.plotly_chart(fig, use_container_width=True)
-
-st.divider()
-
-# =========================================================
-# TOP 10 SUBSISTEMA / COMPONENTE / PARTE (por DT)
-# =========================================================
-st.subheader("Top 10 por tiempo de falla (DT): Subsistema, Componente y Parte")
-
-# Intentamos detectar nombres de columnas típicos
-col_subs = find_first_existing_col(ev_sel, ["SUBSISTEMA", "SUB_SISTEMA", "SUB-SISTEMA", "SUBSYSTEM"])
-col_comp = find_first_existing_col(ev_sel, ["COMPONENTE", "COMPONENT", "COMP"])
-col_part = find_first_existing_col(ev_sel, ["PARTE", "PIEZA", "PART", "ITEM"])
-
-ev_f2 = ev_sel[ev_sel["CATEGORIA_EVENTO"].astype(str).str.upper() == "FALLA"].copy()
-ev_f2["DT_HR"] = pd.to_numeric(ev_f2["DT_MIN"], errors="coerce") / 60.0
-
-if (col_subs is None) or (col_comp is None) or (col_part is None):
-    st.info(
-        "No encontré una o más columnas necesarias para Subsistema/Componente/Parte en EVENTOS_TURNO.csv.\n\n"
-        f"Detectado:\n- Subsistema: {col_subs}\n- Componente: {col_comp}\n- Parte: {col_part}\n\n"
-        f"Columnas disponibles (EVENTOS): {', '.join(list(ev_sel.columns)[:40])}"
-    )
-else:
-    cA, cB, cC = st.columns(3)
-
-    with cA:
-        section_title_center("Top 10 Subsistema por DT (h)")
-        d = (ev_f2.groupby(col_subs, dropna=True)["DT_HR"].sum()
-             .reset_index().rename(columns={col_subs: "SUBSISTEMA"})
-             .sort_values("DT_HR", ascending=False).head(10))
-        fig = px.bar(d, x="DT_HR", y="SUBSISTEMA", orientation="h")
-        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Downtime (h)", yaxis_title="Subsistema")
-        st.plotly_chart(fig, use_container_width=True)
-
-    with cB:
-        section_title_center("Top 10 Componente por DT (h)")
-        d = (ev_f2.groupby(col_comp, dropna=True)["DT_HR"].sum()
-             .reset_index().rename(columns={col_comp: "COMPONENTE"})
-             .sort_values("DT_HR", ascending=False).head(10))
-        fig = px.bar(d, x="DT_HR", y="COMPONENTE", orientation="h")
-        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Downtime (h)", yaxis_title="Componente")
-        st.plotly_chart(fig, use_container_width=True)
-
-    with cC:
-        section_title_center("Top 10 Parte por DT (h)")
-        d = (ev_f2.groupby(col_part, dropna=True)["DT_HR"].sum()
-             .reset_index().rename(columns={col_part: "PARTE"})
-             .sort_values("DT_HR", ascending=False).head(10))
-        fig = px.bar(d, x="DT_HR", y="PARTE", orientation="h")
-        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Downtime (h)", yaxis_title="Parte")
-        st.plotly_chart(fig, use_container_width=True)
-
-st.divider()
-
-# =========================================================
-# EVOLUCIÓN POR MES-AÑO (MTTR y MTBF) - SEGÚN PROCESO
+# EVOLUCIÓN POR MES-AÑO (sensitivo a vista + filtros)
 # =========================================================
 st.subheader("Evolución por mes-año (MTTR y MTBF)")
 
-if id_proceso_sel is None:
-    st.info("Selecciona un **Proceso** (botón) en el filtro lateral para ver su evolución mensual.")
-else:
-    base = turnos.copy()
+base = turnos.copy()
 
-    if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
-        d1 = pd.to_datetime(date_range[0])
-        d2 = pd.to_datetime(date_range[1])
-        base = base[(base["FECHA"] >= d1) & (base["FECHA"] <= d2)]
+# Rango fechas
+if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
+    d1 = pd.to_datetime(date_range[0])
+    d2 = pd.to_datetime(date_range[1])
+    base = base[(base["FECHA"] >= d1) & (base["FECHA"] <= d2)]
 
-    # filtros iguales
-    if cult_sel != "(Todos)":
-        base = base[base["CULTIVO"] == cult_sel]
-    if trc_sel != "(Todos)":
-        base = base[base["ID_TRACTOR"].astype(str) == str(trc_sel)]
-    if imp_sel != "(Todos)":
-        base = base[base["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
-    if turno_sel_label != "(Todos)":
-        val = "D" if turno_sel_label == "Día" else "N"
-        base = base[base["TURNO"].astype(str).str.upper().str.startswith(val)]
-
+# aplicar filtros actuales (cultivo/turno/tractor/implemento/proceso)
+if cult_sel:
+    base = base[base["CULTIVO"] == cult_sel]
+if turn_sel:
+    base = base[base["TURNO_NORM"] == turn_sel]
+if trc_sel != "(Todos)":
+    base = base[base["ID_TRACTOR"].astype(str) == str(trc_sel)]
+if imp_sel != "(Todos)":
+    base = base[base["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
+if id_proceso_sel is not None:
     base = base[base["ID_PROCESO"].astype(str) == str(id_proceso_sel)]
-    st.caption(f"Proceso seleccionado: **{proc_sel_name}**")
 
-    if base.empty:
-        st.info("Con los filtros actuales, no hay turnos para este proceso.")
+if base.empty:
+    st.info("Con los filtros actuales, no hay datos para construir la evolución mensual.")
+else:
+    if id_proceso_sel is not None:
+        st.caption(f"Proceso seleccionado: **{proc_map.get(str(id_proceso_sel), proc_name_sel)}**")
     else:
-        base["MES"] = base["FECHA"].dt.to_period("M").astype(str)
-        ids = set(base["ID_TURNO"].astype(str).tolist())
+        st.caption("Proceso seleccionado: **(Todos)**")
 
-        h = horometros[horometros["ID_TURNO"].astype(str).isin(ids)].copy()
-        e = eventos[eventos["ID_TURNO"].astype(str).isin(ids)].copy()
-        e = e[e["CATEGORIA_EVENTO"].astype(str).str.upper() == "FALLA"].copy()
-        e["DT_HR"] = pd.to_numeric(e["DT_MIN"], errors="coerce") / 60.0
+    base["MES"] = base["FECHA"].dt.to_period("M").astype(str)  # YYYY-MM
+    ids = set(base["ID_TURNO"].astype(str).tolist())
 
-        turn_mes = base[["ID_TURNO", "MES"]].copy()
-        turn_mes["ID_TURNO"] = turn_mes["ID_TURNO"].astype(str)
+    h = horometros[horometros["ID_TURNO"].astype(str).isin(ids)].copy()
+    e = eventos[eventos["ID_TURNO"].astype(str).isin(ids)].copy()
 
-        h2 = h.merge(turn_mes, on="ID_TURNO", how="left")
+    # fallas + DT
+    e = e[e["CATEGORIA_EVENTO"].astype(str).str.upper() == "FALLA"].copy()
+    e["DT_HR"] = pd.to_numeric(e["DT_MIN"], errors="coerce") / 60.0
 
-        # TO mensual según vista:
-        if vista_disp == "Tractor":
-            h2 = h2[h2["TIPO_EQUIPO"].astype(str).str.upper() == "TRACTOR"].copy()
-        else:
-            # Implemento o Sistema -> TO implemento
-            h2 = h2[h2["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
+    # Map turno -> mes
+    turn_mes = base[["ID_TURNO", "MES", "ID_TRACTOR", "ID_IMPLEMENTO"]].copy()
+    turn_mes["ID_TURNO"] = turn_mes["ID_TURNO"].astype(str)
 
-        to_mes = h2.groupby("MES", dropna=True)["TO_HORO"].sum().reset_index(name="TO_HR")
+    # TO por mes según vista
+    h2 = h.merge(turn_mes[["ID_TURNO", "MES"]], on="ID_TURNO", how="left")
+    if vista_disp == "Tractor":
+        h2 = h2[h2["TIPO_EQUIPO"].astype(str).str.upper() == "TRACTOR"].copy()
+    else:
+        # Sistema o Implemento -> TO base implemento
+        h2 = h2[h2["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
 
-        e2 = e.merge(turn_mes, on="ID_TURNO", how="left")
-        dt_mes = e2.groupby("MES", dropna=True).agg(
-            DT_HR=("DT_HR", "sum"),
-            FALLAS=("DT_HR", "size")
-        ).reset_index()
+    to_mes = h2.groupby("MES", dropna=True)["TO_HORO"].sum().reset_index(name="TO_HR")
 
-        evo = to_mes.merge(dt_mes, on="MES", how="left").fillna({"DT_HR": 0.0, "FALLAS": 0})
-        evo["MTTR_HR"] = np.where(evo["FALLAS"] > 0, evo["DT_HR"] / evo["FALLAS"], np.nan)
-        evo["MTBF_HR"] = np.where(evo["FALLAS"] > 0, evo["TO_HR"] / evo["FALLAS"], np.nan)
-        evo = evo.sort_values("MES", ascending=True)
+    # Downtime y fallas por mes según vista
+    e2 = e.merge(turn_mes, on="ID_TURNO", how="left")
 
-        cA, cB = st.columns(2)
-        with cA:
-            section_title_center("MTTR (h/falla) por mes")
-            fig1 = px.bar(evo, x="MES", y="MTTR_HR")
-            fig1.update_layout(
-                xaxis_title="Mes (YYYY-MM)", yaxis_title="MTTR (h/falla)",
-                margin=dict(l=20, r=20, t=10, b=20)
-            )
-            st.plotly_chart(fig1, use_container_width=True)
+    if vista_disp == "Tractor":
+        trcs = base["ID_TRACTOR"].dropna().astype(str).unique().tolist()
+        e2 = e2[e2["ID_EQUIPO_AFECTADO"].astype(str).isin(trcs)]
+    elif vista_disp == "Implemento":
+        imps = base["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist()
+        e2 = e2[e2["ID_EQUIPO_AFECTADO"].astype(str).isin(imps)]
+    else:
+        # Sistema: todas las fallas del universo filtrado
+        pass
 
-        with cB:
-            section_title_center("MTBF (h/falla) por mes")
-            fig2 = px.bar(evo, x="MES", y="MTBF_HR")
-            fig2.update_layout(
-                xaxis_title="Mes (YYYY-MM)", yaxis_title="MTBF (h/falla)",
-                margin=dict(l=20, r=20, t=10, b=20)
-            )
-            st.plotly_chart(fig2, use_container_width=True)
+    dt_mes = e2.groupby("MES", dropna=True).agg(
+        DT_HR=("DT_HR", "sum"),
+        FALLAS=("DT_HR", "size")
+    ).reset_index()
+
+    evo = to_mes.merge(dt_mes, on="MES", how="left").fillna({"DT_HR": 0.0, "FALLAS": 0})
+    evo["MTTR_HR"] = np.where(evo["FALLAS"] > 0, evo["DT_HR"] / evo["FALLAS"], np.nan)
+    evo["MTBF_HR"] = np.where(evo["FALLAS"] > 0, evo["TO_HR"] / evo["FALLAS"], np.nan)
+    evo = evo.sort_values("MES", ascending=True)
+
+    cA, cB = st.columns(2)
+    with cA:
+        fig1 = px.bar(evo, x="MES", y="MTTR_HR", title="MTTR (h/falla) por mes")
+        fig1.update_layout(
+            xaxis_title="Mes (YYYY-MM)",
+            yaxis_title="MTTR (h/falla)",
+            margin=dict(l=20, r=20, t=60, b=20),
+            title_x=0.5
+        )
+        st.plotly_chart(fig1, use_container_width=True)
+
+    with cB:
+        fig2 = px.bar(evo, x="MES", y="MTBF_HR", title="MTBF (h/falla) por mes")
+        fig2.update_layout(
+            xaxis_title="Mes (YYYY-MM)",
+            yaxis_title="MTBF (h/falla)",
+            margin=dict(l=20, r=20, t=60, b=20),
+            title_x=0.5
+        )
+        st.plotly_chart(fig2, use_container_width=True)
 
 st.divider()
 
 # =========================================================
-# TOP 10 POR EQUIPO (CONFIABILIDAD)
+# TOP 10 - OPERACIÓN (TO), DOWNTIME, FALLAS (POR EQUIPO: TRACTORES + IMPLEMENTOS)
+# =========================================================
+st.subheader("Top 10 por Equipo (Operación, Downtime y Fallas)")
+
+# TO por equipo: depende de vista (Tractor -> TO tractor; Implemento/Sistema -> TO implemento)
+h_to = horo_sel.copy()
+if vista_disp == "Tractor":
+    h_to = h_to[h_to["TIPO_EQUIPO"].astype(str).str.upper() == "TRACTOR"].copy()
+else:
+    h_to = h_to[h_to["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
+
+to_equ = (
+    h_to.groupby("ID_EQUIPO", dropna=True)["TO_HORO"].sum()
+    .reset_index().rename(columns={"TO_HORO": "TO_HR"})
+)
+
+# Downtime y fallas por equipo (siempre por equipo afectado)
+ev_rank = ev_sel[ev_sel["CATEGORIA_EVENTO"].astype(str).str.upper() == "FALLA"].copy()
+if not ev_rank.empty:
+    ev_rank["DT_HR"] = pd.to_numeric(ev_rank["DT_MIN"], errors="coerce") / 60.0
+else:
+    ev_rank["DT_HR"] = pd.Series(dtype=float)
+
+dt_equ = (
+    ev_rank.groupby("ID_EQUIPO_AFECTADO", dropna=True)["DT_HR"].sum()
+    .reset_index().rename(columns={"ID_EQUIPO_AFECTADO": "ID_EQUIPO", "DT_HR": "DT_HR"})
+)
+fa_equ = (
+    ev_rank.groupby("ID_EQUIPO_AFECTADO", dropna=True).size()
+    .reset_index(name="FALLAS").rename(columns={"ID_EQUIPO_AFECTADO": "ID_EQUIPO"})
+)
+
+top_ops = to_equ.merge(dt_equ, on="ID_EQUIPO", how="left").merge(fa_equ, on="ID_EQUIPO", how="left")
+top_ops = top_ops.fillna({"DT_HR": 0.0, "FALLAS": 0})
+top_ops["ID_EQUIPO"] = top_ops["ID_EQUIPO"].astype(str)
+
+c1, c2, c3 = st.columns(3)
+
+with c1:
+    st.markdown(center_title("Top 10 por Tiempo de Operación (TO)"), unsafe_allow_html=True)
+    d = top_ops.sort_values("TO_HR", ascending=False).head(10)
+    fig = px.bar(d, x="TO_HR", y="ID_EQUIPO", orientation="h")
+    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+
+with c2:
+    st.markdown(center_title("Top 10 por Downtime (h)"), unsafe_allow_html=True)
+    d = top_ops.sort_values("DT_HR", ascending=False).head(10)
+    fig = px.bar(d, x="DT_HR", y="ID_EQUIPO", orientation="h")
+    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+
+with c3:
+    st.markdown(center_title("Top 10 por Cantidad de Fallas"), unsafe_allow_html=True)
+    d = top_ops.sort_values("FALLAS", ascending=False).head(10)
+    fig = px.bar(d, x="FALLAS", y="ID_EQUIPO", orientation="h")
+    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+
+st.divider()
+
+# =========================================================
+# TOP 10 - CONFIABILIDAD POR EQUIPO (TRACTORES + IMPLEMENTOS)
 # =========================================================
 st.subheader("Top 10 por Equipo (Confiabilidad)")
 
+# Construye DF por equipo con TO propio + DT + fallas
+# TO total por equipo (todos los equipos presentes)
+to_all = (
+    horo_sel.groupby(["TIPO_EQUIPO", "ID_EQUIPO"], dropna=True)["TO_HORO"].sum()
+    .reset_index().rename(columns={"TO_HORO": "TO_HR"})
+)
+to_all["TIPO_EQUIPO"] = to_all["TIPO_EQUIPO"].astype(str).str.upper()
+to_all["ID_EQUIPO"] = to_all["ID_EQUIPO"].astype(str)
+
+dt_all = (
+    ev_rank.groupby("ID_EQUIPO_AFECTADO", dropna=True).agg(
+        DT_HR=("DT_HR", "sum"),
+        FALLAS=("DT_HR", "size")
+    ).reset_index().rename(columns={"ID_EQUIPO_AFECTADO": "ID_EQUIPO"})
+)
+dt_all["ID_EQUIPO"] = dt_all["ID_EQUIPO"].astype(str)
+
+# Join (TO por equipo + dt/fallas)
+top_rel = to_all.merge(dt_all, on="ID_EQUIPO", how="left").fillna({"DT_HR": 0.0, "FALLAS": 0})
+top_rel["MTTR_HR"] = np.where(top_rel["FALLAS"] > 0, top_rel["DT_HR"] / top_rel["FALLAS"], np.nan)
+top_rel["MTBF_HR"] = np.where(top_rel["FALLAS"] > 0, top_rel["TO_HR"] / top_rel["FALLAS"], np.nan)
+top_rel["DISP"] = np.where((top_rel["TO_HR"] + top_rel["DT_HR"]) > 0, top_rel["TO_HR"] / (top_rel["TO_HR"] + top_rel["DT_HR"]), np.nan)
+
+# Respetar vista: Tractor / Implemento / Sistema
 if vista_disp == "Tractor":
-    equipos_ids2 = sorted(list(set(trc_ids)))
+    top_rel = top_rel[top_rel["TIPO_EQUIPO"] == "TRACTOR"].copy()
 elif vista_disp == "Implemento":
-    equipos_ids2 = sorted(list(set(imp_ids)))
+    top_rel = top_rel[top_rel["TIPO_EQUIPO"] == "IMPLEMENTO"].copy()
 else:
-    equipos_ids2 = sorted(list(set(trc_ids + imp_ids)))
-
-to_equipo = (
-    horo_sel[horo_sel["ID_EQUIPO"].astype(str).isin(equipos_ids2)]
-    .groupby("ID_EQUIPO", dropna=True)["TO_HORO"].sum()
-    .reset_index(name="TO_HR")
-)
-
-ev_fallas_rank = ev_sel[ev_sel["CATEGORIA_EVENTO"].astype(str).str.upper() == "FALLA"].copy()
-ev_fallas_rank["DT_HR"] = pd.to_numeric(ev_fallas_rank["DT_MIN"], errors="coerce") / 60.0
-
-falla_equipo = (
-    ev_fallas_rank[ev_fallas_rank["ID_EQUIPO_AFECTADO"].astype(str).isin(equipos_ids2)]
-    .groupby("ID_EQUIPO_AFECTADO", dropna=True)
-    .agg(DT_FALLA_HR=("DT_HR", "sum"), FALLAS=("DT_HR", "size"))
-    .reset_index()
-    .rename(columns={"ID_EQUIPO_AFECTADO": "ID_EQUIPO"})
-)
-
-top_df = to_equipo.merge(falla_equipo, on="ID_EQUIPO", how="left").fillna({"DT_FALLA_HR": 0.0, "FALLAS": 0})
-top_df["MTTR_HR"] = np.where(top_df["FALLAS"] > 0, top_df["DT_FALLA_HR"] / top_df["FALLAS"], np.nan)
-top_df["MTBF_HR"] = np.where(top_df["FALLAS"] > 0, top_df["TO_HR"] / top_df["FALLAS"], np.nan)
-top_df["DISP"] = np.where(
-    (top_df["TO_HR"] + top_df["DT_FALLA_HR"]) > 0,
-    top_df["TO_HR"] / (top_df["TO_HR"] + top_df["DT_FALLA_HR"]),
-    np.nan
-)
+    # Sistema: ambos
+    pass
 
 colA, colB, colC = st.columns(3)
 
 with colA:
-    section_title_center("MTTR alto (peor)")
-    d = top_df.dropna(subset=["MTTR_HR"]).sort_values("MTTR_HR", ascending=False).head(10)
+    st.markdown(center_title("MTTR alto (peor)"), unsafe_allow_html=True)
+    d = top_rel.dropna(subset=["MTTR_HR"]).sort_values("MTTR_HR", ascending=False).head(10)
     fig = px.bar(d, x="MTTR_HR", y="ID_EQUIPO", orientation="h")
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), xaxis_title="MTTR (h/falla)", yaxis_title="Equipo")
+    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
     st.plotly_chart(fig, use_container_width=True)
 
 with colB:
-    section_title_center("MTBF bajo (peor)")
-    d = top_df.dropna(subset=["MTBF_HR"]).sort_values("MTBF_HR", ascending=True).head(10)
+    st.markdown(center_title("MTBF bajo (peor)"), unsafe_allow_html=True)
+    d = top_rel.dropna(subset=["MTBF_HR"]).sort_values("MTBF_HR", ascending=True).head(10)
     fig = px.bar(d, x="MTBF_HR", y="ID_EQUIPO", orientation="h")
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), xaxis_title="MTBF (h/falla)", yaxis_title="Equipo")
+    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
     st.plotly_chart(fig, use_container_width=True)
 
 with colC:
-    section_title_center("Disponibilidad baja (peor)")
-    d = top_df.dropna(subset=["DISP"]).sort_values("DISP", ascending=True).head(10)
+    st.markdown(center_title("Disponibilidad baja (peor)"), unsafe_allow_html=True)
+    d = top_rel.dropna(subset=["DISP"]).sort_values("DISP", ascending=True).head(10)
     fig = px.bar(d, x="DISP", y="ID_EQUIPO", orientation="h")
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Disponibilidad", yaxis_title="Equipo")
+    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
     st.plotly_chart(fig, use_container_width=True)
+
+st.divider()
+
+# =========================================================
+# TOP 10 TÉCNICO (SUBUNIDAD / COMPONENTE / PARTE) POR TIEMPO DE FALLA
+# =========================================================
+st.subheader("Top 10 Técnico (Subunidad / Componente / Parte) por Tiempo de Falla (h)")
+
+if fd_sel is None:
+    st.info("No se encontró **FALLAS_DETALLE_NORMALIZADO.csv** dentro del ZIP (data_normalizada/).")
+else:
+    # Verificar columnas mínimas
+    cols_need = ["DOWNTIME_HR"]
+    missing = [c for c in cols_need if c not in fd_sel.columns]
+    if missing:
+        st.info(f"El archivo FALLAS_DETALLE_NORMALIZADO.csv no tiene columnas requeridas: {missing}")
+    else:
+        # Respetar vista (tractor/implemento/sistema)
+        if "TIPO_EQUIPO" in fd_sel.columns:
+            if vista_disp == "Tractor":
+                fd_view = fd_sel[fd_sel["TIPO_EQUIPO"].astype(str).str.upper() == "TRACTOR"].copy()
+            elif vista_disp == "Implemento":
+                fd_view = fd_sel[fd_sel["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
+            else:
+                fd_view = fd_sel.copy()
+        else:
+            fd_view = fd_sel.copy()
+
+        # función top
+        def top10_bar(df, col, title):
+            if col not in df.columns:
+                st.info(f"No existe la columna **{col}** en FALLAS_DETALLE_NORMALIZADO.")
+                return
+            g = (
+                df.groupby(col, dropna=True)["DOWNTIME_HR"].sum()
+                .reset_index().sort_values("DOWNTIME_HR", ascending=False).head(10)
+            )
+            g[col] = g[col].astype(str)
+            fig = px.bar(g, x="DOWNTIME_HR", y=col, orientation="h")
+            fig.update_layout(
+                margin=dict(l=10, r=10, t=10, b=10),
+                xaxis_title="Tiempo de Falla (h)",
+                yaxis_title="",
+            )
+            st.markdown(center_title(title), unsafe_allow_html=True)
+            st.plotly_chart(fig, use_container_width=True)
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            top10_bar(fd_view, "SUBUNIDAD", "Top 10 SUBUNIDAD")
+        with c2:
+            top10_bar(fd_view, "COMPONENTE", "Top 10 COMPONENTE")
+        with c3:
+            top10_bar(fd_view, "PARTE", "Top 10 PARTE")
 
 st.divider()
 
@@ -752,3 +805,11 @@ st.download_button(
     file_name="EVENTOS_filtrado.csv",
     mime="text/csv",
 )
+
+if fd_sel is not None:
+    st.download_button(
+        "Descargar FALLAS_DETALLE filtrado (CSV)",
+        data=fd_sel.to_csv(index=False).encode("utf-8-sig"),
+        file_name="FALLAS_DETALLE_filtrado.csv",
+        mime="text/csv",
+    )
