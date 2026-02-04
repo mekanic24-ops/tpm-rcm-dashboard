@@ -9,7 +9,7 @@ import plotly.express as px
 # =========================================================
 # CONFIG
 # =========================================================
-st.set_page_config(page_title="DESEMPEÑO OPERACIONAL DE LA FLOTA - INDICADORES DE CONFIABILIDAD - MANTENIBILIDAD - DISPONIBILIDAD", layout="wide")
+st.set_page_config(page_title="DESEMPEÑO OPERACIONAL DE LA FLOTA", layout="wide")
 
 ZIP_NAME = "TPM_modelo_normalizado_CSV.zip"
 DATA_DIR = Path("data_normalizada")
@@ -46,19 +46,15 @@ def load_tables() -> dict:
     lotes = r("LOTES.csv")
     fallas_cat = r("FALLAS_CATALOGO.csv")
 
-    # Nuevo: catálogo de procesos (en el root del repo)
-    cat_path = Path("CAT_PROCESO.csv")
-    if not cat_path.exists():
-        st.error("Falta CAT_PROCESO.csv en el repo. Súbelo junto al script.")
-        st.stop()
-    cat_proceso = pd.read_csv(cat_path, encoding="utf-8-sig")
+    # Catálogo proceso DESDE el ZIP
+    cat_proceso = r("CAT_PROCESO.csv")
 
     # Tipos
     turnos["FECHA"] = pd.to_datetime(turnos["FECHA"], errors="coerce")
     horometros["TO_HORO"] = pd.to_numeric(horometros["TO_HORO"], errors="coerce")
     eventos["DT_MIN"] = pd.to_numeric(eventos["DT_MIN"], errors="coerce")
 
-    # Llaves como string (evitar 1.0 / 2.0)
+    # Llaves como string (evitar 1.0)
     for col in ["ID_TURNO", "ID_TRACTOR", "ID_IMPLEMENTO", "ID_LOTE", "ID_OPERADOR", "ID_PROCESO", "TURNO"]:
         if col in turnos.columns:
             turnos[col] = turnos[col].astype(str).str.replace(".0", "", regex=False)
@@ -90,15 +86,11 @@ def load_tables() -> dict:
 
 def build_enriched_turnos(turnos, operadores, lotes):
     t = turnos.copy()
-
-    # Operador
     op_map = dict(zip(operadores["ID_OPERADOR"].astype(str), operadores["NOMBRE_OPERADOR"].astype(str)))
     t["OPERADOR_NOMBRE"] = t["ID_OPERADOR"].astype(str).map(op_map)
 
-    # Cultivo (se mantiene para filtro Cultivo)
     lote_map = dict(zip(lotes["ID_LOTE"].astype(str), lotes["CULTIVO"].astype(str)))
     t["CULTIVO"] = t["ID_LOTE"].astype(str).map(lote_map)
-
     return t
 
 def safe_div(a, b):
@@ -110,7 +102,7 @@ def safe_div(a, b):
         return np.nan
 
 # =========================================================
-# CSS (Cards y paneles con borde + redondeo)
+# CSS (Cards centrados + sin espacios vacíos)
 # =========================================================
 st.markdown(
     """
@@ -121,21 +113,29 @@ st.markdown(
         padding: 14px 14px 12px 14px;
         background: rgba(255,255,255,0.02);
         margin-bottom: 10px;
+        height: 110px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;      /* centra horizontal */
+        text-align: center;       /* centra texto */
     }
     .kpi-title{
         font-size: 12px;
         opacity: 0.75;
         margin-bottom: 6px;
+        line-height: 1.1;
     }
     .kpi-value{
         font-size: 30px;
-        font-weight: 750;
+        font-weight: 780;
         line-height: 1.05;
     }
     .kpi-sub{
         font-size: 12px;
         opacity: 0.7;
         margin-top: 6px;
+        line-height: 1.1;
     }
     .panel{
         border: 2px solid rgba(0,0,0,0.18);
@@ -144,11 +144,23 @@ st.markdown(
         background: rgba(255,255,255,0.02);
         margin-bottom: 14px;
     }
-    .filter-hint{
-        font-size: 12px;
-        opacity: 0.85;
-        margin-top: -4px;
-        margin-bottom: 10px;
+    .title-wrap{
+        margin-top: 8px;
+        margin-bottom: 12px;
+    }
+    .main-title{
+        font-size: 46px;
+        font-weight: 900;
+        letter-spacing: 0.5px;
+        margin: 0;
+        line-height: 1.05;
+    }
+    .sub-title{
+        font-size: 18px;
+        opacity: 0.8;
+        margin: 10px 0 0 0;
+        line-height: 1.2;
+        font-weight: 600;
     }
     </style>
     """,
@@ -205,10 +217,6 @@ turnos = build_enriched_turnos(turnos, operadores, lotes)
 # SIDEBAR FILTERS (sin LOTE)
 # =========================================================
 st.sidebar.header("Filtros")
-st.sidebar.markdown(
-    '<div class="filter-hint">Los filtros muestran <b>Nombre</b> y el <b>ID</b> si aplica.</div>',
-    unsafe_allow_html=True
-)
 
 min_d = turnos["FECHA"].min()
 max_d = turnos["FECHA"].max()
@@ -223,7 +231,7 @@ if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
     d2 = pd.to_datetime(date_range[1])
     df_f = df_f[(df_f["FECHA"] >= d1) & (df_f["FECHA"] <= d2)]
 
-# Proceso con catálogo (Nombre [ID])
+# Proceso con catálogo
 proc_map = dict(zip(cat_proceso["ID_PROCESO"], cat_proceso["NOMBRE_PROCESO"]))
 proc_ids = sorted(df_f["ID_PROCESO"].dropna().astype(str).unique().tolist())
 proc_labels = ["(Todos)"] + [f"{proc_map.get(pid, 'PROCESO')} [{pid}]" for pid in proc_ids]
@@ -232,31 +240,31 @@ if proc_label_sel != "(Todos)":
     id_proceso = proc_label_sel.split("[")[-1].replace("]", "").strip()
     df_f = df_f[df_f["ID_PROCESO"].astype(str) == id_proceso]
 
-# Cultivo (texto)
+# Cultivo
 cult_opts = ["(Todos)"] + sorted(df_f["CULTIVO"].dropna().astype(str).unique().tolist())
 cult_sel = st.sidebar.selectbox("Cultivo", cult_opts, index=0)
 if cult_sel != "(Todos)":
     df_f = df_f[df_f["CULTIVO"].astype(str) == str(cult_sel)]
 
-# Tractor (código)
+# Tractor
 trc_opts = ["(Todos)"] + sorted(df_f["ID_TRACTOR"].dropna().astype(str).unique().tolist())
 trc_sel = st.sidebar.selectbox("Tractor", trc_opts, index=0)
 if trc_sel != "(Todos)":
     df_f = df_f[df_f["ID_TRACTOR"].astype(str) == str(trc_sel)]
 
-# Implemento (código)
+# Implemento
 imp_opts = ["(Todos)"] + sorted(df_f["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist())
 imp_sel = st.sidebar.selectbox("Implemento", imp_opts, index=0)
 if imp_sel != "(Todos)":
     df_f = df_f[df_f["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
 
-# Operador (nombre)
+# Operador
 op_opts = ["(Todos)"] + sorted(df_f["OPERADOR_NOMBRE"].dropna().astype(str).unique().tolist())
 op_sel = st.sidebar.selectbox("Operador", op_opts, index=0)
 if op_sel != "(Todos)":
     df_f = df_f[df_f["OPERADOR_NOMBRE"].astype(str) == str(op_sel)]
 
-# Turno (D/N)
+# Turno
 turno_opts = ["(Todos)"] + sorted(df_f["TURNO"].dropna().astype(str).unique().tolist())
 turno_sel = st.sidebar.selectbox("Turno (D/N)", turno_opts, index=0)
 if turno_sel != "(Todos)":
@@ -280,7 +288,7 @@ horo_sel = horometros[horometros["ID_TURNO"].astype(str).isin(ids_turno)].copy()
 ev_sel = eventos[eventos["ID_TURNO"].astype(str).isin(ids_turno)].copy()
 
 # =========================================================
-# KPI GLOBAL (según vista_disp)
+# KPI GLOBAL
 # =========================================================
 to_trac = horo_sel.loc[horo_sel["TIPO_EQUIPO"] == "TRACTOR", "TO_HORO"].sum()
 to_imp  = horo_sel.loc[horo_sel["TIPO_EQUIPO"] == "IMPLEMENTO", "TO_HORO"].sum()
@@ -298,7 +306,6 @@ if vista_disp == "Sistema (TRC+IMP)":
     to_base = to_imp
     dt_base = ev_fallas["DT_HR"].sum()
     n_base = int(len(ev_fallas))
-
 elif vista_disp == "Tractor":
     to_base = to_trac
     if trc_sel != "(Todos)":
@@ -308,8 +315,7 @@ elif vista_disp == "Tractor":
         ev_b = ev_fallas[ev_fallas["ID_EQUIPO_AFECTADO"].astype(str).isin(trcs)]
     dt_base = ev_b["DT_HR"].sum() if not ev_b.empty else 0.0
     n_base = int(len(ev_b))
-
-else:  # Implemento
+else:
     to_base = to_imp
     if imp_sel != "(Todos)":
         ev_b = fallas_de_equipo(imp_sel)
@@ -324,40 +330,45 @@ mtbf_hr = (to_base / n_base) if n_base > 0 else np.nan
 disp = ((to_base - dt_base) / to_base) if (to_base and to_base > 0) else np.nan
 
 # =========================================================
-# UI HEADER
+# TITULO Y SUBTITULO (como pediste)
 # =========================================================
-st.title("DESEMPEÑO OPERACIONAL DE LA FLOTA - INDICADORES DE CONFIABILIDAD - MANTENIBILIDAD - DISPONIBILIDAD")
+st.markdown(
+    """
+    <div class="title-wrap">
+      <h1 class="main-title">DESEMPEÑO OPERACIONAL DE LA FLOTA</h1>
+      <div class="sub-title">INDICADORES DE CONFIABILIDAD - MANTENIBILIDAD - DISPONIBILIDAD</div>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
 st.caption(f"Vista actual de KPIs: **{vista_disp}**")
 
 # =========================================================
-# KPI CARDS (sin card Turnos)
+# CARDS (sin cuadros vacíos)
 # =========================================================
-col1, col2, col3, col4, col5, col6 = st.columns(6)
-with col1:
+row1 = st.columns(5)
+with row1[0]:
     kpi_card("TO Tractor (h)", f"{to_trac:,.2f}")
-with col2:
+with row1[1]:
     kpi_card("TO Implemento (h)", f"{to_imp:,.2f}")
-with col3:
+with row1[2]:
     kpi_card("Downtime Fallas (h)", f"{dt_base:,.2f}")
-with col4:
+with row1[3]:
     kpi_card("Fallas", f"{n_base:,}")
-with col5:
+with row1[4]:
     kpi_card("Disponibilidad", f"{disp*100:,.2f}%" if pd.notna(disp) else "—")
-with col6:
-    kpi_card(" ", " ")
 
-col7, col8, col9 = st.columns(3)
-with col7:
+row2 = st.columns(2)
+with row2[0]:
     kpi_card("MTTR (h/falla)", f"{mttr_hr:,.2f}" if pd.notna(mttr_hr) else "—", color=mttr_color(mttr_hr))
-with col8:
+with row2[1]:
     kpi_card(
         "MTBF (h/falla)",
         f"{mtbf_hr:,.2f}" if pd.notna(mtbf_hr) else "—",
         color=mtbf_color(mtbf_hr),
         sub="Rojo <100 | Verde 100–500 | Azul >500"
     )
-with col9:
-    kpi_card(" ", " ")
 
 st.divider()
 
@@ -466,7 +477,7 @@ st.markdown("</div>", unsafe_allow_html=True)
 st.divider()
 
 # =========================================================
-# TOP 10 TÉCNICO (Subsis / Comp / Parte) sin “ISO 14224” en textos
+# TOP 10 TÉCNICO
 # =========================================================
 st.markdown('<div class="panel">', unsafe_allow_html=True)
 st.subheader("Top 10 técnico: SUBSISTEMA / COMPONENTE / PARTE")
@@ -495,12 +506,12 @@ else:
         st.info("No hay fallas en la vista seleccionada para construir el ranking técnico.")
     else:
         fcat = fallas_cat.copy()
-        rename_iso = {}
+        rename_map = {}
         if "SUB UNIDAD" in fcat.columns:
-            rename_iso["SUB UNIDAD"] = "SUBSISTEMA"
+            rename_map["SUB UNIDAD"] = "SUBSISTEMA"
         if "PIEZA" in fcat.columns:
-            rename_iso["PIEZA"] = "PARTE"
-        fcat = fcat.rename(columns=rename_iso)
+            rename_map["PIEZA"] = "PARTE"
+        fcat = fcat.rename(columns=rename_map)
 
         ev_f = ev_f.merge(fcat, on="ID_FALLA", how="left")
 
@@ -565,41 +576,29 @@ else:
         with c3:
             rank_group("PARTE", "Top 10 por PARTE")
 
-        with st.expander("Ver detalle (Top 10)"):
-            # muestra un resumen de las 3 tablas (si deseas)
-            pass
-
-        with st.expander("Ver tabla de fallas (vista técnica)"):
-            cols_show = [c for c in ["ID_TURNO", "ID_EQUIPO_AFECTADO", "ID_FALLA", "SUBSISTEMA", "COMPONENTE", "PARTE", "DT_HR"] if c in ev_f.columns]
-            st.dataframe(ev_f[cols_show].sort_values("DT_HR", ascending=False).head(300), use_container_width=True)
-
 st.markdown("</div>", unsafe_allow_html=True)
-st.divider()
 
 # =========================================================
 # DESCARGAS
 # =========================================================
+st.divider()
 st.subheader("Descargar datos filtrados")
-
-turnos_out = turnos_sel.copy()
-horo_out = horo_sel.copy()
-ev_out = ev_sel.copy()
 
 st.download_button(
     "Descargar TURNOS filtrado (CSV)",
-    data=turnos_out.to_csv(index=False).encode("utf-8-sig"),
+    data=turnos_sel.to_csv(index=False).encode("utf-8-sig"),
     file_name="TURNOS_filtrado.csv",
     mime="text/csv",
 )
 st.download_button(
     "Descargar HOROMETROS filtrado (CSV)",
-    data=horo_out.to_csv(index=False).encode("utf-8-sig"),
+    data=horo_sel.to_csv(index=False).encode("utf-8-sig"),
     file_name="HOROMETROS_TURNO_filtrado.csv",
     mime="text/csv",
 )
 st.download_button(
     "Descargar EVENTOS filtrado (CSV)",
-    data=ev_out.to_csv(index=False).encode("utf-8-sig"),
+    data=ev_sel.to_csv(index=False).encode("utf-8-sig"),
     file_name="EVENTOS_TURNO_filtrado.csv",
     mime="text/csv",
 )
