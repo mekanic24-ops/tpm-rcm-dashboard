@@ -1,5 +1,6 @@
 import zipfile
 from pathlib import Path
+from typing import Optional, List
 
 import numpy as np
 import pandas as pd
@@ -53,8 +54,8 @@ def load_tables() -> dict:
     horometros["TO_HORO"] = pd.to_numeric(horometros["TO_HORO"], errors="coerce")
     eventos["DT_MIN"] = pd.to_numeric(eventos["DT_MIN"], errors="coerce")
 
-    def norm_str(s):
-        return s.astype(str).str.replace(".0", "", regex=False)
+    def norm_str(s: pd.Series) -> pd.Series:
+        return s.astype(str).str.replace(".0", "", regex=False).str.strip()
 
     # Normalización IDs comunes
     for col in ["ID_TURNO", "ID_TRACTOR", "ID_IMPLEMENTO", "ID_LOTE", "ID_OPERADOR", "ID_PROCESO", "TURNO"]:
@@ -73,10 +74,10 @@ def load_tables() -> dict:
         fallas_cat["ID_FALLA"] = norm_str(fallas_cat["ID_FALLA"])
 
     cat_proceso["ID_PROCESO"] = norm_str(cat_proceso["ID_PROCESO"])
-    cat_proceso["NOMBRE_PROCESO"] = cat_proceso["NOMBRE_PROCESO"].astype(str)
+    cat_proceso["NOMBRE_PROCESO"] = cat_proceso["NOMBRE_PROCESO"].astype(str).str.strip()
 
     operadores["ID_OPERADOR"] = norm_str(operadores["ID_OPERADOR"])
-    operadores["NOMBRE_OPERADOR"] = operadores["NOMBRE_OPERADOR"].astype(str)
+    operadores["NOMBRE_OPERADOR"] = operadores["NOMBRE_OPERADOR"].astype(str).str.strip()
 
     lotes["ID_LOTE"] = norm_str(lotes["ID_LOTE"])
     lotes["CULTIVO"] = lotes["CULTIVO"].astype(str)
@@ -91,6 +92,17 @@ def load_tables() -> dict:
         "cat_proceso": cat_proceso,
     }
 
+def normalize_cultivo(x) -> Optional[str]:
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return None
+    s = str(x).strip().upper()
+    s = s.replace("Á", "A").replace("É", "E").replace("Í", "I").replace("Ó", "O").replace("Ú", "U")
+    if s in ["PALTA", "PALTO"]:
+        return "PALTO"
+    if s in ["ARANDANO", "ARANDANO "]:
+        return "ARANDANO"
+    return s
+
 def build_enriched_turnos(turnos, operadores, lotes):
     t = turnos.copy()
     op_map = dict(zip(operadores["ID_OPERADOR"], operadores["NOMBRE_OPERADOR"]))
@@ -98,11 +110,12 @@ def build_enriched_turnos(turnos, operadores, lotes):
 
     lote_map = dict(zip(lotes["ID_LOTE"], lotes["CULTIVO"]))
     t["CULTIVO"] = t["ID_LOTE"].map(lote_map)
+    t["CULTIVO"] = t["CULTIVO"].apply(normalize_cultivo)
     return t
 
 def mttr_color_3(v):
     """<1.2 azul | 1.2-2.5 verde | >2.5 rojo"""
-    if pd.isna(v):
+    if v is None or pd.isna(v):
         return None
     if v < 1.2:
         return "#1f77b4"  # azul
@@ -111,13 +124,24 @@ def mttr_color_3(v):
     return "#d62728"      # rojo
 
 def mtbf_color(v):
-    if pd.isna(v):
+    if v is None or pd.isna(v):
         return None
     if v < 100:
-        return "#d62728"          # rojo
+        return "#d62728"  # rojo
     if 100 <= v <= 500:
-        return "#2ca02c"          # verde
-    return "#1f77b4"              # azul
+        return "#2ca02c"  # verde
+    return "#1f77b4"      # azul
+
+def disp_color(d):
+    """d viene como ratio 0-1"""
+    if d is None or pd.isna(d):
+        return None
+    p = d * 100
+    if p < 90:
+        return "#d62728"   # rojo
+    if p <= 95:
+        return "#2ca02c"   # verde
+    return "#1f77b4"       # azul
 
 def fmt_num(x, dec=2):
     if x is None or pd.isna(x):
@@ -129,72 +153,84 @@ def fmt_pct(x, dec=2):
         return "—"
     return f"{x*100:,.{dec}f}%"
 
-def kpi_card_html(title: str, value: str, color: str | None = None, hint: str | None = None):
+def kpi_card_html(title: str, value: str, color: Optional[str] = None, hint: Optional[str] = None) -> str:
     val_style = "color:#111;"
     if color:
         val_style = f"color:{color};"
-    hint_html = f"<div class='kpi-hint'>{hint}</div>" if hint else ""
+
+    # Siempre reservamos espacio para que todas las tarjetas queden alineadas
+    hint_text = hint if hint else "&nbsp;"
+
     return f"""
       <div class="kpi">
         <div class="kpi-title">{title}</div>
         <div class="kpi-value" style="{val_style}">{value}</div>
-        {hint_html}
+        <div class="kpi-hint">{hint_text}</div>
       </div>
     """
 
-def render_kpi_row(cards_html: list[str], big=False):
+def render_kpi_row(cards_html: List[str], big: bool = False):
     row_class = "kpi-row big" if big else "kpi-row"
-    html = f"""
-    <div class="{row_class}">
-      {''.join(cards_html)}
-    </div>
-    """
-    # components.html evita que Streamlit “escape” el HTML (problema que viste)
-    height = 150 if not big else 170
-    components.html(html, height=height)
 
-# =========================================================
-# CSS (solo alineación, sin bordes para evitar flicker)
-# =========================================================
-st.markdown(
+    # CSS DENTRO del componente (evita que se vea como texto y evita “escape”)
+    html = f"""
+    <html>
+      <head>
+        <style>
+          .kpi-row{{
+            display:flex;
+            gap:28px;
+            justify-content:center;
+            align-items:flex-start;
+            flex-wrap:wrap;
+            margin: 6px 0 0 0;
+            font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+          }}
+          .kpi{{
+            width: 300px;
+            min-height: 150px;
+            padding: 8px 10px;
+            text-align:center;
+            box-sizing:border-box;
+          }}
+          .kpi-title{{
+            font-size: 16px;
+            font-weight: 800;
+            color: #111;
+            margin: 0 0 10px 0;
+            line-height: 1.2;
+          }}
+          .kpi-value{{
+            font-size: 52px;
+            font-weight: 400;
+            line-height: 1.05;
+            margin: 0 0 8px 0;
+          }}
+          .kpi-hint{{
+            font-size: 12px;
+            color: #6b7280;
+            line-height: 1.2;
+            min-height: 16px;
+          }}
+          .kpi-row.big .kpi{{
+            width: 320px;
+            min-height: 165px;
+          }}
+          .kpi-row.big .kpi-value{{
+            font-size: 56px;
+          }}
+        </style>
+      </head>
+      <body style="margin:0;padding:0;">
+        <div class="{row_class}">
+          {''.join(cards_html)}
+        </div>
+      </body>
+    </html>
     """
-    <style>
-      .kpi-row{
-        display:flex;
-        gap:28px;
-        justify-content:center;
-        align-items:stretch;
-        flex-wrap:wrap;
-        margin: 6px 0 0 0;
-      }
-      .kpi{
-        width: 270px;
-        padding: 6px 8px;
-        text-align:center;
-        box-sizing:border-box;
-      }
-      .kpi-title{
-        font-size: 16px;
-        font-weight: 800;
-        color: #111;
-        margin-bottom: 10px;
-      }
-      .kpi-value{
-        font-size: 46px;
-        font-weight: 400;
-        line-height: 1.05;
-        margin-bottom: 6px;
-      }
-      .kpi-hint{
-        font-size: 12px;
-        color: #6b7280;
-      }
-      .kpi-row.big .kpi{ width: 320px; }
-      .kpi-row.big .kpi-value{ font-size: 50px; }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+
+    height = 185 if big else 175
+    components.html(html, height=height)
 
 # =========================================================
 # LOAD
@@ -226,7 +262,7 @@ if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
     df_f = df_f[(df_f["FECHA"] >= d1) & (df_f["FECHA"] <= d2)]
 
 # Proceso (label bonito)
-proc_map = dict(zip(cat_proceso["ID_PROCESO"], cat_proceso["NOMBRE_PROCESO"]))
+proc_map = dict(zip(cat_proceso["ID_PROCESO"].astype(str), cat_proceso["NOMBRE_PROCESO"].astype(str)))
 all_proc_ids = sorted(df_f["ID_PROCESO"].dropna().astype(str).unique().tolist())
 proc_labels = ["(Todos)"] + [f"{proc_map.get(pid, 'PROCESO')} [{pid}]" for pid in all_proc_ids]
 
@@ -236,27 +272,37 @@ if proc_label_sel != "(Todos)":
     id_proceso_sel = proc_label_sel.split("[")[-1].replace("]", "").strip()
     df_f = df_f[df_f["ID_PROCESO"].astype(str) == id_proceso_sel]
 
-# Otros filtros
-cult_opts = ["(Todos)"] + sorted(df_f["CULTIVO"].dropna().astype(str).unique().tolist())
-cult_sel = st.sidebar.selectbox("Cultivo", cult_opts, index=0)
-if cult_sel != "(Todos)":
-    df_f = df_f[df_f["CULTIVO"].astype(str) == str(cult_sel)]
+# Cultivo (solo Palto / Arandano)
+cult_map_label = {"PALTO": "Palto", "ARANDANO": "Arandano"}
+cult_vals = sorted([v for v in df_f["CULTIVO"].dropna().unique().tolist() if v in cult_map_label])
+cult_opts = ["(Todos)"] + [cult_map_label[v] for v in cult_vals]
+cult_sel_label = st.sidebar.selectbox("Cultivo", cult_opts, index=0)
 
+cult_sel = "(Todos)"
+if cult_sel_label != "(Todos)":
+    inv = {v: k for k, v in cult_map_label.items()}
+    cult_sel = inv[cult_sel_label]
+    df_f = df_f[df_f["CULTIVO"] == cult_sel]
+
+# Tractor
 trc_opts = ["(Todos)"] + sorted(df_f["ID_TRACTOR"].dropna().astype(str).unique().tolist())
 trc_sel = st.sidebar.selectbox("Tractor", trc_opts, index=0)
 if trc_sel != "(Todos)":
     df_f = df_f[df_f["ID_TRACTOR"].astype(str) == str(trc_sel)]
 
+# Implemento
 imp_opts = ["(Todos)"] + sorted(df_f["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist())
 imp_sel = st.sidebar.selectbox("Implemento", imp_opts, index=0)
 if imp_sel != "(Todos)":
     df_f = df_f[df_f["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
 
+# Operador
 op_opts = ["(Todos)"] + sorted(df_f["OPERADOR_NOMBRE"].dropna().astype(str).unique().tolist())
 op_sel = st.sidebar.selectbox("Operador", op_opts, index=0)
 if op_sel != "(Todos)":
     df_f = df_f[df_f["OPERADOR_NOMBRE"].astype(str) == str(op_sel)]
 
+# Turno
 turno_opts = ["(Todos)"] + sorted(df_f["TURNO"].dropna().astype(str).unique().tolist())
 turno_sel = st.sidebar.selectbox("Turno (D/N)", turno_opts, index=0)
 if turno_sel != "(Todos)":
@@ -330,33 +376,34 @@ st.caption("INDICADORES DE CONFIABILIDAD - MANTENIBILIDAD - DISPONIBILIDAD")
 st.caption(f"Vista actual de KPIs: **{vista_disp}**")
 
 # =========================================================
-# KPIs (render HTML robusto)
+# KPIs (6 cards: 3 arriba + 3 abajo)
 # =========================================================
 row1 = [
-    kpi_card_html("TO Tractor (h)", fmt_num(to_trac)),
     kpi_card_html("TO Implemento (h)", fmt_num(to_imp)),
     kpi_card_html("Downtime Fallas (h)", fmt_num(dt_base)),
     kpi_card_html("Fallas", f"{n_base:,}"),
 ]
 render_kpi_row(row1, big=False)
 
-mttr_col = mttr_color_3(mttr_hr)
-mtbf_col = mtbf_color(mtbf_hr)
-
 row2 = [
     kpi_card_html(
         "MTTR (h/falla)",
         fmt_num(mttr_hr),
-        color=mttr_col,
+        color=mttr_color_3(mttr_hr),
         hint="Azul <1.2 | Verde 1.2–2.5 | Rojo >2.5",
     ),
     kpi_card_html(
         "MTBF (h/falla)",
         fmt_num(mtbf_hr),
-        color=mtbf_col,
+        color=mtbf_color(mtbf_hr),
         hint="Rojo <100 | Verde 100–500 | Azul >500",
     ),
-    kpi_card_html("Disponibilidad", fmt_pct(disp)),
+    kpi_card_html(
+        "Disponibilidad",
+        fmt_pct(disp),
+        color=disp_color(disp),
+        hint="Rojo <90% | Verde 90–95% | Azul >95%",
+    ),
 ]
 render_kpi_row(row2, big=True)
 
@@ -378,11 +425,10 @@ else:
         d2 = pd.to_datetime(date_range[1])
         base = base[(base["FECHA"] >= d1) & (base["FECHA"] <= d2)]
 
-    # aplicar mismos filtros (ya que quieres que refleje la selección)
+    # aplicar mismos filtros seleccionados
     base = base[base["ID_PROCESO"].astype(str) == str(id_proceso_sel)]
-
     if cult_sel != "(Todos)":
-        base = base[base["CULTIVO"].astype(str) == str(cult_sel)]
+        base = base[base["CULTIVO"] == cult_sel]
     if trc_sel != "(Todos)":
         base = base[base["ID_TRACTOR"].astype(str) == str(trc_sel)]
     if imp_sel != "(Todos)":
@@ -412,13 +458,11 @@ else:
         turn_mes = base[["ID_TURNO", "MES"]].copy()
         turn_mes["ID_TURNO"] = turn_mes["ID_TURNO"].astype(str)
 
-        # TO por mes según vista
+        # TO por mes según vista (Tractor vs Implemento)
         h2 = h.merge(turn_mes, on="ID_TURNO", how="left")
-
         if vista_disp == "Tractor":
             h2 = h2[h2["TIPO_EQUIPO"] == "TRACTOR"].copy()
         else:
-            # Sistema o Implemento -> base implemento
             h2 = h2[h2["TIPO_EQUIPO"] == "IMPLEMENTO"].copy()
 
         to_mes = h2.groupby("MES", dropna=True)["TO_HORO"].sum().reset_index(name="TO_HR")
