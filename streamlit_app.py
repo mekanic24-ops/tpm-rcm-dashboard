@@ -1,6 +1,6 @@
 import zipfile
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -220,9 +220,24 @@ def render_kpi_row(cards_html: List[str], big: bool = False):
 
 def section_title_center(text: str):
     st.markdown(
-        f"<div style='text-align:center;font-size:18px;font-weight:800;margin:0 0 6px 0'>{text}</div>",
+        f"<div style='text-align:center;font-size:18px;font-weight:900;margin:0 0 6px 0'>{text}</div>",
         unsafe_allow_html=True
     )
+
+def nice_process_name(s: str) -> str:
+    # "APLICACIÓN" -> "Aplicación"
+    s = (s or "").strip()
+    if not s:
+        return s
+    return s.lower().capitalize()
+
+def find_first_existing_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    cols_upper = {c.upper(): c for c in df.columns}
+    for cand in candidates:
+        key = cand.upper()
+        if key in cols_upper:
+            return cols_upper[key]
+    return None
 
 # =========================================================
 # LOAD
@@ -238,81 +253,132 @@ cat_proceso = tables["cat_proceso"]
 # =========================================================
 st.sidebar.header("Filtros")
 
+# ---- Fecha
 min_d = turnos["FECHA"].min()
 max_d = turnos["FECHA"].max()
 date_range = st.sidebar.date_input(
     "Rango de fechas",
     value=(min_d.date() if pd.notna(min_d) else None, max_d.date() if pd.notna(max_d) else None),
+    key="f_date_range",
 )
 
-df_f = turnos.copy()
+df_base = turnos.copy()
 if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
     d1 = pd.to_datetime(date_range[0])
     d2 = pd.to_datetime(date_range[1])
-    df_f = df_f[(df_f["FECHA"] >= d1) & (df_f["FECHA"] <= d2)]
+    df_base = df_base[(df_base["FECHA"] >= d1) & (df_base["FECHA"] <= d2)]
 
-# Proceso (simple)
-proc_map = dict(zip(cat_proceso["ID_PROCESO"].astype(str), cat_proceso["NOMBRE_PROCESO"].astype(str)))
-all_proc_ids = sorted(df_f["ID_PROCESO"].dropna().astype(str).unique().tolist())
-proc_labels = ["(Todos)"] + [f"{proc_map.get(pid, 'PROCESO')} [{pid}]" for pid in all_proc_ids]
-
-proc_label_sel = st.sidebar.selectbox("Proceso", proc_labels, index=0)
-id_proceso_sel = None
-if proc_label_sel != "(Todos)":
-    id_proceso_sel = proc_label_sel.split("[")[-1].replace("]", "").strip()
-    df_f = df_f[df_f["ID_PROCESO"].astype(str) == id_proceso_sel]
-
-# Cultivo
-cult_map_label = {"PALTO": "Palto", "ARANDANO": "Arandano"}
-cult_vals = sorted([v for v in df_f["CULTIVO"].dropna().unique().tolist() if v in cult_map_label])
-cult_opts = ["(Todos)"] + [cult_map_label[v] for v in cult_vals]
-cult_sel_label = st.sidebar.selectbox("Cultivo", cult_opts, index=0)
-
+# ---- Cultivo (BOTONES)
+cult_options = ["(Todos)", "Palto", "Arandano"]
+cult_sel_label = st.sidebar.radio("Cultivo", cult_options, index=0, key="f_cultivo_radio")
 cult_sel = "(Todos)"
 if cult_sel_label != "(Todos)":
-    inv = {v: k for k, v in cult_map_label.items()}
-    cult_sel = inv[cult_sel_label]
-    df_f = df_f[df_f["CULTIVO"] == cult_sel]
+    cult_sel = "PALTO" if cult_sel_label == "Palto" else "ARANDANO"
+    df_base = df_base[df_base["CULTIVO"] == cult_sel]
 
-# Tractor / Implemento
-trc_opts = ["(Todos)"] + sorted(df_f["ID_TRACTOR"].dropna().astype(str).unique().tolist())
-trc_sel = st.sidebar.selectbox("Tractor", trc_opts, index=0)
+# ---- Tractor (desplegable se mantiene)
+trc_opts = ["(Todos)"] + sorted(df_base["ID_TRACTOR"].dropna().astype(str).unique().tolist())
+trc_sel = st.sidebar.selectbox("Tractor", trc_opts, index=0, key="f_trc_sel")
+df_tmp = df_base.copy()
 if trc_sel != "(Todos)":
-    df_f = df_f[df_f["ID_TRACTOR"].astype(str) == str(trc_sel)]
+    df_tmp = df_tmp[df_tmp["ID_TRACTOR"].astype(str) == str(trc_sel)]
 
-imp_opts = ["(Todos)"] + sorted(df_f["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist())
-imp_sel = st.sidebar.selectbox("Implemento", imp_opts, index=0)
+# ---- Implemento (desplegable se mantiene)
+imp_opts = ["(Todos)"] + sorted(df_tmp["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist())
+imp_sel = st.sidebar.selectbox("Implemento", imp_opts, index=0, key="f_imp_sel")
 if imp_sel != "(Todos)":
-    df_f = df_f[df_f["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
+    df_tmp = df_tmp[df_tmp["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
 
-# Turno
-turno_opts = ["(Todos)"] + sorted(df_f["TURNO"].dropna().astype(str).unique().tolist())
-turno_sel = st.sidebar.selectbox("Turno (D/N)", turno_opts, index=0)
-if turno_sel != "(Todos)":
-    df_f = df_f[df_f["TURNO"].astype(str) == str(turno_sel)]
+# ---- Turno (BOTONES)
+# Valores reales suelen ser "D" / "N", pero tu data también podría traer "DIA"/"NOCHE".
+# Aquí filtramos por contiene (robusto).
+turno_options = ["(Todos)", "Día", "Noche"]
+turno_sel_label = st.sidebar.radio("Turno (D/N)", turno_options, index=0, key="f_turno_radio")
+if turno_sel_label != "(Todos)":
+    val = "D" if turno_sel_label == "Día" else "N"
+    df_tmp = df_tmp[df_tmp["TURNO"].astype(str).str.upper().str.startswith(val)]
 
+# =========================================================
+# PROCESO COMO BOTONES, ORDENADO POR TO (IMPLEMENTO)
+# (calculado con filtros previos ya aplicados, pero SIN filtrar por proceso)
+# =========================================================
+proc_map_id_to_name = dict(zip(cat_proceso["ID_PROCESO"].astype(str), cat_proceso["NOMBRE_PROCESO"].astype(str)))
+
+# Turnos "previos" (ya con fecha/cultivo/tractor/implemento/turno)
+turnos_prev = df_tmp.copy()
+ids_prev = set(turnos_prev["ID_TURNO"].astype(str).tolist())
+
+h_prev = horometros[horometros["ID_TURNO"].astype(str).isin(ids_prev)].copy()
+h_prev_imp = h_prev[h_prev["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
+
+# sum TO implemento por proceso
+if not h_prev_imp.empty and not turnos_prev.empty:
+    aux = h_prev_imp.merge(turnos_prev[["ID_TURNO", "ID_PROCESO"]], on="ID_TURNO", how="left")
+    to_proc = aux.groupby("ID_PROCESO", dropna=True)["TO_HORO"].sum().reset_index(name="TO_IMP_HR")
+else:
+    to_proc = pd.DataFrame(columns=["ID_PROCESO", "TO_IMP_HR"])
+
+to_proc["ID_PROCESO"] = to_proc["ID_PROCESO"].astype(str)
+to_proc = to_proc.sort_values("TO_IMP_HR", ascending=False)
+
+# lista de nombres (solo nombre, sin [id])
+proc_names_ordered = []
+proc_name_to_id = {}
+for _, r in to_proc.iterrows():
+    pid = str(r["ID_PROCESO"])
+    pname_raw = proc_map_id_to_name.get(pid, "PROCESO")
+    pname = nice_process_name(pname_raw)
+    # si hay duplicados de nombre, nos quedamos con el que tenga más TO
+    if pname not in proc_name_to_id:
+        proc_name_to_id[pname] = pid
+        proc_names_ordered.append(pname)
+
+# incluir procesos que existen en los turnos previos pero con TO 0 (por si no hay horómetros)
+if proc_names_ordered:
+    pass
+else:
+    # fallback: por catálogo
+    uniq_ids = sorted(turnos_prev["ID_PROCESO"].dropna().astype(str).unique().tolist())
+    for pid in uniq_ids:
+        pname = nice_process_name(proc_map_id_to_name.get(pid, "PROCESO"))
+        if pname not in proc_name_to_id:
+            proc_name_to_id[pname] = pid
+            proc_names_ordered.append(pname)
+
+proc_radio_opts = ["(Todos)"] + proc_names_ordered
+proc_sel_name = st.sidebar.radio("Proceso (ordenado por TO implemento)", proc_radio_opts, index=0, key="f_proc_radio")
+
+id_proceso_sel = None
+turnos_sel = turnos_prev.copy()
+if proc_sel_name != "(Todos)":
+    id_proceso_sel = proc_name_to_id.get(proc_sel_name)
+    if id_proceso_sel is not None:
+        turnos_sel = turnos_sel[turnos_sel["ID_PROCESO"].astype(str) == str(id_proceso_sel)]
+
+# =========================================================
+# VISTA KPI
+# =========================================================
 vista_disp = st.sidebar.radio(
     "Disponibilidad / MTBF / MTTR basados en:",
     ["Sistema (TRC+IMP)", "Tractor", "Implemento"],
     index=0,
+    key="f_vista_disp",
 )
 
 # =========================================================
-# SELECCIÓN
+# SELECCIÓN FINAL
 # =========================================================
-turnos_sel = df_f.copy()
 ids_turno = set(turnos_sel["ID_TURNO"].astype(str).tolist())
-
 horo_sel = horometros[horometros["ID_TURNO"].astype(str).isin(ids_turno)].copy()
 ev_sel = eventos[eventos["ID_TURNO"].astype(str).isin(ids_turno)].copy()
 
 # =========================================================
 # KPI GLOBAL
 # =========================================================
-to_trac = float(horo_sel.loc[horo_sel["TIPO_EQUIPO"] == "TRACTOR", "TO_HORO"].sum())
-to_imp = float(horo_sel.loc[horo_sel["TIPO_EQUIPO"] == "IMPLEMENTO", "TO_HORO"].sum())
+to_trac = float(horo_sel.loc[horo_sel["TIPO_EQUIPO"].astype(str).str.upper() == "TRACTOR", "TO_HORO"].sum())
+to_imp = float(horo_sel.loc[horo_sel["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO", "TO_HORO"].sum())
 
-ev_fallas = ev_sel[ev_sel["CATEGORIA_EVENTO"] == "FALLA"].copy()
+ev_fallas = ev_sel[ev_sel["CATEGORIA_EVENTO"].astype(str).str.upper() == "FALLA"].copy()
 if not ev_fallas.empty:
     ev_fallas["DT_HR"] = pd.to_numeric(ev_fallas["DT_MIN"], errors="coerce") / 60.0
 else:
@@ -394,11 +460,10 @@ render_kpi_row(row2, big=True)
 st.divider()
 
 # =========================================================
-# TOP 10 (TO, Downtime, Fallas) - EQUIPOS
+# TOP 10 DE EQUIPOS: TO, DT, FALLAS (NO SOLO IMPLEMENTOS)
 # =========================================================
 st.subheader("Top 10 de equipos: TO, Downtime y Fallas")
 
-# equipos según vista
 trc_ids = turnos_sel["ID_TRACTOR"].dropna().astype(str).unique().tolist()
 imp_ids = turnos_sel["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist()
 
@@ -409,13 +474,13 @@ elif vista_disp == "Implemento":
 else:
     equipos_ids = sorted(list(set(trc_ids + imp_ids)))
 
-# TO por equipo (según vista: tractor/implemento/sistema)
+# TO por equipo según vista
 h_to = horo_sel.copy()
 if vista_disp == "Tractor":
-    h_to = h_to[h_to["TIPO_EQUIPO"] == "TRACTOR"]
+    h_to = h_to[h_to["TIPO_EQUIPO"].astype(str).str.upper() == "TRACTOR"]
 elif vista_disp == "Implemento":
-    h_to = h_to[h_to["TIPO_EQUIPO"] == "IMPLEMENTO"]
-# Sistema: deja ambos
+    h_to = h_to[h_to["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"]
+# Sistema: ambos
 
 to_eq = (
     h_to[h_to["ID_EQUIPO"].astype(str).isin(equipos_ids)]
@@ -423,8 +488,8 @@ to_eq = (
     .reset_index(name="TO_HR")
 )
 
-# Downtime y Fallas por equipo
-ev_f = ev_sel[ev_sel["CATEGORIA_EVENTO"] == "FALLA"].copy()
+# DT y fallas por equipo
+ev_f = ev_sel[ev_sel["CATEGORIA_EVENTO"].astype(str).str.upper() == "FALLA"].copy()
 if not ev_f.empty:
     ev_f["DT_HR"] = pd.to_numeric(ev_f["DT_MIN"], errors="coerce") / 60.0
 else:
@@ -441,7 +506,6 @@ dt_eq = (
 op_eq = to_eq.merge(dt_eq, on="ID_EQUIPO", how="left").fillna({"DT_HR": 0.0, "FALLAS": 0})
 
 c1, c2, c3 = st.columns(3)
-
 with c1:
     section_title_center("Top 10 por TO (h)")
     d = op_eq.sort_values("TO_HR", ascending=False).head(10)
@@ -466,13 +530,63 @@ with c3:
 st.divider()
 
 # =========================================================
+# TOP 10 SUBSISTEMA / COMPONENTE / PARTE (por DT)
+# =========================================================
+st.subheader("Top 10 por tiempo de falla (DT): Subsistema, Componente y Parte")
+
+# Intentamos detectar nombres de columnas típicos
+col_subs = find_first_existing_col(ev_sel, ["SUBSISTEMA", "SUB_SISTEMA", "SUB-SISTEMA", "SUBSYSTEM"])
+col_comp = find_first_existing_col(ev_sel, ["COMPONENTE", "COMPONENT", "COMP"])
+col_part = find_first_existing_col(ev_sel, ["PARTE", "PIEZA", "PART", "ITEM"])
+
+ev_f2 = ev_sel[ev_sel["CATEGORIA_EVENTO"].astype(str).str.upper() == "FALLA"].copy()
+ev_f2["DT_HR"] = pd.to_numeric(ev_f2["DT_MIN"], errors="coerce") / 60.0
+
+if (col_subs is None) or (col_comp is None) or (col_part is None):
+    st.info(
+        "No encontré una o más columnas necesarias para Subsistema/Componente/Parte en EVENTOS_TURNO.csv.\n\n"
+        f"Detectado:\n- Subsistema: {col_subs}\n- Componente: {col_comp}\n- Parte: {col_part}\n\n"
+        f"Columnas disponibles (EVENTOS): {', '.join(list(ev_sel.columns)[:40])}"
+    )
+else:
+    cA, cB, cC = st.columns(3)
+
+    with cA:
+        section_title_center("Top 10 Subsistema por DT (h)")
+        d = (ev_f2.groupby(col_subs, dropna=True)["DT_HR"].sum()
+             .reset_index().rename(columns={col_subs: "SUBSISTEMA"})
+             .sort_values("DT_HR", ascending=False).head(10))
+        fig = px.bar(d, x="DT_HR", y="SUBSISTEMA", orientation="h")
+        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Downtime (h)", yaxis_title="Subsistema")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with cB:
+        section_title_center("Top 10 Componente por DT (h)")
+        d = (ev_f2.groupby(col_comp, dropna=True)["DT_HR"].sum()
+             .reset_index().rename(columns={col_comp: "COMPONENTE"})
+             .sort_values("DT_HR", ascending=False).head(10))
+        fig = px.bar(d, x="DT_HR", y="COMPONENTE", orientation="h")
+        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Downtime (h)", yaxis_title="Componente")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with cC:
+        section_title_center("Top 10 Parte por DT (h)")
+        d = (ev_f2.groupby(col_part, dropna=True)["DT_HR"].sum()
+             .reset_index().rename(columns={col_part: "PARTE"})
+             .sort_values("DT_HR", ascending=False).head(10))
+        fig = px.bar(d, x="DT_HR", y="PARTE", orientation="h")
+        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Downtime (h)", yaxis_title="Parte")
+        st.plotly_chart(fig, use_container_width=True)
+
+st.divider()
+
+# =========================================================
 # EVOLUCIÓN POR MES-AÑO (MTTR y MTBF) - SEGÚN PROCESO
-# (y sensible a vista: Tractor/Implemento/Sistema)
 # =========================================================
 st.subheader("Evolución por mes-año (MTTR y MTBF)")
 
 if id_proceso_sel is None:
-    st.info("Selecciona un **Proceso** en el filtro lateral para ver su evolución mensual.")
+    st.info("Selecciona un **Proceso** (botón) en el filtro lateral para ver su evolución mensual.")
 else:
     base = turnos.copy()
 
@@ -481,20 +595,19 @@ else:
         d2 = pd.to_datetime(date_range[1])
         base = base[(base["FECHA"] >= d1) & (base["FECHA"] <= d2)]
 
-    base = base[base["ID_PROCESO"].astype(str) == str(id_proceso_sel)]
-
-    # aplicar otros filtros (excepto operador que ya no usas en la vista principal)
+    # filtros iguales
     if cult_sel != "(Todos)":
         base = base[base["CULTIVO"] == cult_sel]
     if trc_sel != "(Todos)":
         base = base[base["ID_TRACTOR"].astype(str) == str(trc_sel)]
     if imp_sel != "(Todos)":
         base = base[base["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
-    if turno_sel != "(Todos)":
-        base = base[base["TURNO"].astype(str) == str(turno_sel)]
+    if turno_sel_label != "(Todos)":
+        val = "D" if turno_sel_label == "Día" else "N"
+        base = base[base["TURNO"].astype(str).str.upper().str.startswith(val)]
 
-    proc_name = proc_map.get(str(id_proceso_sel), f"Proceso {id_proceso_sel}")
-    st.caption(f"Proceso seleccionado: **{proc_name}**")
+    base = base[base["ID_PROCESO"].astype(str) == str(id_proceso_sel)]
+    st.caption(f"Proceso seleccionado: **{proc_sel_name}**")
 
     if base.empty:
         st.info("Con los filtros actuales, no hay turnos para este proceso.")
@@ -504,20 +617,20 @@ else:
 
         h = horometros[horometros["ID_TURNO"].astype(str).isin(ids)].copy()
         e = eventos[eventos["ID_TURNO"].astype(str).isin(ids)].copy()
-
-        e = e[e["CATEGORIA_EVENTO"] == "FALLA"].copy()
+        e = e[e["CATEGORIA_EVENTO"].astype(str).str.upper() == "FALLA"].copy()
         e["DT_HR"] = pd.to_numeric(e["DT_MIN"], errors="coerce") / 60.0
 
         turn_mes = base[["ID_TURNO", "MES"]].copy()
         turn_mes["ID_TURNO"] = turn_mes["ID_TURNO"].astype(str)
 
         h2 = h.merge(turn_mes, on="ID_TURNO", how="left")
+
         # TO mensual según vista:
         if vista_disp == "Tractor":
-            h2 = h2[h2["TIPO_EQUIPO"] == "TRACTOR"].copy()
+            h2 = h2[h2["TIPO_EQUIPO"].astype(str).str.upper() == "TRACTOR"].copy()
         else:
-            # Implemento o Sistema -> preferencia TO implemento
-            h2 = h2[h2["TIPO_EQUIPO"] == "IMPLEMENTO"].copy()
+            # Implemento o Sistema -> TO implemento
+            h2 = h2[h2["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
 
         to_mes = h2.groupby("MES", dropna=True)["TO_HORO"].sum().reset_index(name="TO_HR")
 
@@ -559,26 +672,23 @@ st.divider()
 st.subheader("Top 10 por Equipo (Confiabilidad)")
 
 if vista_disp == "Tractor":
-    equipos_ids = sorted(list(set(trc_ids)))
+    equipos_ids2 = sorted(list(set(trc_ids)))
 elif vista_disp == "Implemento":
-    equipos_ids = sorted(list(set(imp_ids)))
+    equipos_ids2 = sorted(list(set(imp_ids)))
 else:
-    equipos_ids = sorted(list(set(trc_ids + imp_ids)))
+    equipos_ids2 = sorted(list(set(trc_ids + imp_ids)))
 
 to_equipo = (
-    horo_sel[horo_sel["ID_EQUIPO"].astype(str).isin(equipos_ids)]
+    horo_sel[horo_sel["ID_EQUIPO"].astype(str).isin(equipos_ids2)]
     .groupby("ID_EQUIPO", dropna=True)["TO_HORO"].sum()
     .reset_index(name="TO_HR")
 )
 
-ev_fallas_rank = ev_sel[ev_sel["CATEGORIA_EVENTO"] == "FALLA"].copy()
-if not ev_fallas_rank.empty:
-    ev_fallas_rank["DT_HR"] = pd.to_numeric(ev_fallas_rank["DT_MIN"], errors="coerce") / 60.0
-else:
-    ev_fallas_rank["DT_HR"] = pd.Series(dtype=float)
+ev_fallas_rank = ev_sel[ev_sel["CATEGORIA_EVENTO"].astype(str).str.upper() == "FALLA"].copy()
+ev_fallas_rank["DT_HR"] = pd.to_numeric(ev_fallas_rank["DT_MIN"], errors="coerce") / 60.0
 
 falla_equipo = (
-    ev_fallas_rank[ev_fallas_rank["ID_EQUIPO_AFECTADO"].astype(str).isin(equipos_ids)]
+    ev_fallas_rank[ev_fallas_rank["ID_EQUIPO_AFECTADO"].astype(str).isin(equipos_ids2)]
     .groupby("ID_EQUIPO_AFECTADO", dropna=True)
     .agg(DT_FALLA_HR=("DT_HR", "sum"), FALLAS=("DT_HR", "size"))
     .reset_index()
