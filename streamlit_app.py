@@ -103,6 +103,14 @@ def normalize_cultivo(x) -> Optional[str]:
         return "ARANDANO"
     return s
 
+def norm_turno(x) -> str:
+    s = str(x).strip().upper()
+    if s in ["D", "DIA", "DÍA", "DAY"]:
+        return "D"
+    if s in ["N", "NOCHE", "NIGHT"]:
+        return "N"
+    return s
+
 def build_enriched_turnos(turnos, operadores, lotes):
     t = turnos.copy()
     op_map = dict(zip(operadores["ID_OPERADOR"], operadores["NOMBRE_OPERADOR"]))
@@ -111,6 +119,9 @@ def build_enriched_turnos(turnos, operadores, lotes):
     lote_map = dict(zip(lotes["ID_LOTE"], lotes["CULTIVO"]))
     t["CULTIVO"] = t["ID_LOTE"].map(lote_map)
     t["CULTIVO"] = t["CULTIVO"].apply(normalize_cultivo)
+
+    if "TURNO" in t.columns:
+        t["TURNO_NORM"] = t["TURNO"].apply(norm_turno)
     return t
 
 def mttr_color_3(v):
@@ -157,10 +168,7 @@ def kpi_card_html(title: str, value: str, color: Optional[str] = None, hint: Opt
     val_style = "color:#111;"
     if color:
         val_style = f"color:{color};"
-
-    # Siempre reservamos espacio para que todas las tarjetas queden alineadas
     hint_text = hint if hint else "&nbsp;"
-
     return f"""
       <div class="kpi">
         <div class="kpi-title">{title}</div>
@@ -171,8 +179,6 @@ def kpi_card_html(title: str, value: str, color: Optional[str] = None, hint: Opt
 
 def render_kpi_row(cards_html: List[str], big: bool = False):
     row_class = "kpi-row big" if big else "kpi-row"
-
-    # CSS DENTRO del componente (evita que se vea como texto y evita “escape”)
     html = f"""
     <html>
       <head>
@@ -228,7 +234,6 @@ def render_kpi_row(cards_html: List[str], big: bool = False):
       </body>
     </html>
     """
-
     height = 185 if big else 175
     components.html(html, height=height)
 
@@ -239,11 +244,12 @@ tables = load_tables()
 turnos = build_enriched_turnos(tables["turnos"], tables["operadores"], tables["lotes"])
 horometros = tables["horometros"]
 eventos = tables["eventos"]
-fallas_cat = tables["fallas_cat"]
 cat_proceso = tables["cat_proceso"]
 
+proc_map = dict(zip(cat_proceso["ID_PROCESO"].astype(str), cat_proceso["NOMBRE_PROCESO"].astype(str)))
+
 # =========================================================
-# SIDEBAR FILTERS (INTERACTIVO)
+# SIDEBAR FILTERS
 # =========================================================
 st.sidebar.header("Filtros")
 
@@ -255,26 +261,15 @@ date_range = st.sidebar.date_input(
 )
 
 # Base por fechas
-df_f = turnos.copy()
+df_base = turnos.copy()
 if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
     d1 = pd.to_datetime(date_range[0])
     d2 = pd.to_datetime(date_range[1])
-    df_f = df_f[(df_f["FECHA"] >= d1) & (df_f["FECHA"] <= d2)]
-
-# Proceso (label bonito)
-proc_map = dict(zip(cat_proceso["ID_PROCESO"].astype(str), cat_proceso["NOMBRE_PROCESO"].astype(str)))
-all_proc_ids = sorted(df_f["ID_PROCESO"].dropna().astype(str).unique().tolist())
-proc_labels = ["(Todos)"] + [f"{proc_map.get(pid, 'PROCESO')} [{pid}]" for pid in all_proc_ids]
-
-proc_label_sel = st.sidebar.selectbox("Proceso", proc_labels, index=0)
-id_proceso_sel = None
-if proc_label_sel != "(Todos)":
-    id_proceso_sel = proc_label_sel.split("[")[-1].replace("]", "").strip()
-    df_f = df_f[df_f["ID_PROCESO"].astype(str) == id_proceso_sel]
+    df_base = df_base[(df_base["FECHA"] >= d1) & (df_base["FECHA"] <= d2)]
 
 # Cultivo (solo Palto / Arandano)
 cult_map_label = {"PALTO": "Palto", "ARANDANO": "Arandano"}
-cult_vals = sorted([v for v in df_f["CULTIVO"].dropna().unique().tolist() if v in cult_map_label])
+cult_vals = sorted([v for v in df_base["CULTIVO"].dropna().unique().tolist() if v in cult_map_label])
 cult_opts = ["(Todos)"] + [cult_map_label[v] for v in cult_vals]
 cult_sel_label = st.sidebar.selectbox("Cultivo", cult_opts, index=0)
 
@@ -282,32 +277,81 @@ cult_sel = "(Todos)"
 if cult_sel_label != "(Todos)":
     inv = {v: k for k, v in cult_map_label.items()}
     cult_sel = inv[cult_sel_label]
-    df_f = df_f[df_f["CULTIVO"] == cult_sel]
+    df_base = df_base[df_base["CULTIVO"] == cult_sel]
 
 # Tractor
-trc_opts = ["(Todos)"] + sorted(df_f["ID_TRACTOR"].dropna().astype(str).unique().tolist())
+trc_opts = ["(Todos)"] + sorted(df_base["ID_TRACTOR"].dropna().astype(str).unique().tolist())
 trc_sel = st.sidebar.selectbox("Tractor", trc_opts, index=0)
 if trc_sel != "(Todos)":
-    df_f = df_f[df_f["ID_TRACTOR"].astype(str) == str(trc_sel)]
+    df_base = df_base[df_base["ID_TRACTOR"].astype(str) == str(trc_sel)]
 
 # Implemento
-imp_opts = ["(Todos)"] + sorted(df_f["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist())
+imp_opts = ["(Todos)"] + sorted(df_base["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist())
 imp_sel = st.sidebar.selectbox("Implemento", imp_opts, index=0)
 if imp_sel != "(Todos)":
-    df_f = df_f[df_f["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
+    df_base = df_base[df_base["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
 
-# Operador
-op_opts = ["(Todos)"] + sorted(df_f["OPERADOR_NOMBRE"].dropna().astype(str).unique().tolist())
-op_sel = st.sidebar.selectbox("Operador", op_opts, index=0)
-if op_sel != "(Todos)":
-    df_f = df_f[df_f["OPERADOR_NOMBRE"].astype(str) == str(op_sel)]
+# Turno (botones: Día / Noche)
+turno_btn = st.sidebar.radio(
+    "Turno",
+    ["(Todos)", "Día", "Noche"],
+    index=0,
+    horizontal=True
+)
 
-# Turno
-turno_opts = ["(Todos)"] + sorted(df_f["TURNO"].dropna().astype(str).unique().tolist())
-turno_sel = st.sidebar.selectbox("Turno (D/N)", turno_opts, index=0)
-if turno_sel != "(Todos)":
-    df_f = df_f[df_f["TURNO"].astype(str) == str(turno_sel)]
+turno_sel = "(Todos)"
+if turno_btn != "(Todos)":
+    turno_sel = "D" if turno_btn == "Día" else "N"
+    if "TURNO_NORM" in df_base.columns:
+        df_base = df_base[df_base["TURNO_NORM"] == turno_sel]
+    else:
+        df_base = df_base[df_base["TURNO"].apply(norm_turno) == turno_sel]
 
+# =========================================================
+# PROCESO como BOTONES (ordenado por TO implemento desc)
+# =========================================================
+# Calculamos TO implemento por proceso usando el df_base (sin filtrar proceso aún)
+ids_turno_base = set(df_base["ID_TURNO"].astype(str).tolist())
+h_base = horometros[
+    (horometros["ID_TURNO"].astype(str).isin(ids_turno_base)) &
+    (horometros["TIPO_EQUIPO"].astype(str) == "IMPLEMENTO")
+].copy()
+
+to_turno_imp = h_base.groupby("ID_TURNO", dropna=True)["TO_HORO"].sum().reset_index()
+to_turno_imp["ID_TURNO"] = to_turno_imp["ID_TURNO"].astype(str)
+
+tmp_proc = df_base[["ID_TURNO", "ID_PROCESO"]].copy()
+tmp_proc["ID_TURNO"] = tmp_proc["ID_TURNO"].astype(str)
+tmp_proc["ID_PROCESO"] = tmp_proc["ID_PROCESO"].astype(str)
+
+proc_to = tmp_proc.merge(to_turno_imp, on="ID_TURNO", how="left").fillna({"TO_HORO": 0.0})
+proc_to = proc_to.groupby("ID_PROCESO", dropna=True)["TO_HORO"].sum().reset_index(name="TO_IMP_HR")
+
+# Incluir TODOS los procesos del catálogo (los que no aparezcan quedan en 0)
+all_cat = cat_proceso[["ID_PROCESO", "NOMBRE_PROCESO"]].copy()
+all_cat["ID_PROCESO"] = all_cat["ID_PROCESO"].astype(str)
+proc_to = all_cat.merge(proc_to, on="ID_PROCESO", how="left").fillna({"TO_IMP_HR": 0.0})
+
+proc_to = proc_to.sort_values("TO_IMP_HR", ascending=False)
+
+proc_buttons = ["(Todos)"] + [
+    f"{row['NOMBRE_PROCESO']} [{row['ID_PROCESO']}] — {row['TO_IMP_HR']:,.0f} h"
+    for _, row in proc_to.iterrows()
+]
+
+proc_choice = st.sidebar.radio(
+    "Proceso (ordenado por TO implemento)",
+    proc_buttons,
+    index=0
+)
+
+id_proceso_sel = None
+df_f = df_base.copy()
+if proc_choice != "(Todos)":
+    id_proceso_sel = proc_choice.split("[")[-1].split("]")[0].strip()
+    df_f = df_f[df_f["ID_PROCESO"].astype(str) == id_proceso_sel]
+
+# Vista de KPI
 vista_disp = st.sidebar.radio(
     "Disponibilidad / MTBF / MTTR basados en:",
     ["Sistema (TRC+IMP)", "Tractor", "Implemento"],
@@ -315,7 +359,7 @@ vista_disp = st.sidebar.radio(
 )
 
 # =========================================================
-# SELECCIÓN
+# SELECCIÓN FINAL
 # =========================================================
 turnos_sel = df_f.copy()
 ids_turno = set(turnos_sel["ID_TURNO"].astype(str).tolist())
@@ -433,10 +477,9 @@ else:
         base = base[base["ID_TRACTOR"].astype(str) == str(trc_sel)]
     if imp_sel != "(Todos)":
         base = base[base["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
-    if op_sel != "(Todos)":
-        base = base[base["OPERADOR_NOMBRE"].astype(str) == str(op_sel)]
     if turno_sel != "(Todos)":
-        base = base[base["TURNO"].astype(str) == str(turno_sel)]
+        base["TURNO_NORM"] = base["TURNO"].apply(norm_turno)
+        base = base[base["TURNO_NORM"] == turno_sel]
 
     proc_name = proc_map.get(str(id_proceso_sel), f"Proceso {id_proceso_sel}")
     st.caption(f"Proceso seleccionado: **{proc_name}**")
