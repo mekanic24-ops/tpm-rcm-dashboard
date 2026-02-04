@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+import streamlit.components.v1 as components
 
 # =========================================================
 # CONFIG
@@ -47,7 +48,7 @@ def load_tables() -> dict:
     fallas_cat = r("FALLAS_CATALOGO.csv")
     cat_proceso = r("CAT_PROCESO.csv")
 
-    # Tipos
+    # Tipos base
     turnos["FECHA"] = pd.to_datetime(turnos["FECHA"], errors="coerce")
     horometros["TO_HORO"] = pd.to_numeric(horometros["TO_HORO"], errors="coerce")
     eventos["DT_MIN"] = pd.to_numeric(eventos["DT_MIN"], errors="coerce")
@@ -55,7 +56,7 @@ def load_tables() -> dict:
     def norm_str(s):
         return s.astype(str).str.replace(".0", "", regex=False)
 
-    # Normalizar IDs
+    # Normalización IDs comunes
     for col in ["ID_TURNO", "ID_TRACTOR", "ID_IMPLEMENTO", "ID_LOTE", "ID_OPERADOR", "ID_PROCESO", "TURNO"]:
         if col in turnos.columns:
             turnos[col] = norm_str(turnos[col])
@@ -110,10 +111,13 @@ def mttr_color_3(v):
     return "#d62728"      # rojo
 
 def mtbf_color(v):
-    if pd.isna(v): return None
-    if v < 100: return "#d62728"          # rojo
-    if 100 <= v <= 500: return "#2ca02c"  # verde
-    return "#1f77b4"                      # azul
+    if pd.isna(v):
+        return None
+    if v < 100:
+        return "#d62728"          # rojo
+    if 100 <= v <= 500:
+        return "#2ca02c"          # verde
+    return "#1f77b4"              # azul
 
 def fmt_num(x, dec=2):
     if x is None or pd.isna(x):
@@ -125,22 +129,32 @@ def fmt_pct(x, dec=2):
         return "—"
     return f"{x*100:,.{dec}f}%"
 
-def metric_html(title: str, value: str, color: str | None = None, hint: str | None = None):
-    """Card liviano (sin bordes) alineado, con valor grande."""
+def kpi_card_html(title: str, value: str, color: str | None = None, hint: str | None = None):
     val_style = "color:#111;"
     if color:
         val_style = f"color:{color};"
     hint_html = f"<div class='kpi-hint'>{hint}</div>" if hint else ""
     return f"""
-    <div class="kpi">
+      <div class="kpi">
         <div class="kpi-title">{title}</div>
         <div class="kpi-value" style="{val_style}">{value}</div>
         {hint_html}
-    </div>
+      </div>
     """
 
+def render_kpi_row(cards_html: list[str], big=False):
+    row_class = "kpi-row big" if big else "kpi-row"
+    html = f"""
+    <div class="{row_class}">
+      {''.join(cards_html)}
+    </div>
+    """
+    # components.html evita que Streamlit “escape” el HTML (problema que viste)
+    height = 150 if not big else 170
+    components.html(html, height=height)
+
 # =========================================================
-# CSS (solo alineación / tipografías; sin bordes para evitar flicker)
+# CSS (solo alineación, sin bordes para evitar flicker)
 # =========================================================
 st.markdown(
     """
@@ -151,22 +165,22 @@ st.markdown(
         justify-content:center;
         align-items:stretch;
         flex-wrap:wrap;
-        margin-top: 6px;
-        margin-bottom: 6px;
+        margin: 6px 0 0 0;
       }
       .kpi{
-        width: 260px;
-        padding: 8px 10px;
+        width: 270px;
+        padding: 6px 8px;
         text-align:center;
+        box-sizing:border-box;
       }
       .kpi-title{
         font-size: 16px;
         font-weight: 800;
         color: #111;
-        margin-bottom: 8px;
+        margin-bottom: 10px;
       }
       .kpi-value{
-        font-size: 44px;
+        font-size: 46px;
         font-weight: 400;
         line-height: 1.05;
         margin-bottom: 6px;
@@ -175,8 +189,8 @@ st.markdown(
         font-size: 12px;
         color: #6b7280;
       }
-      .kpi-row.small .kpi{ width: 320px; }
-      .kpi-row.small .kpi-value{ font-size: 46px; }
+      .kpi-row.big .kpi{ width: 320px; }
+      .kpi-row.big .kpi-value{ font-size: 50px; }
     </style>
     """,
     unsafe_allow_html=True
@@ -211,15 +225,18 @@ if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
     d2 = pd.to_datetime(date_range[1])
     df_f = df_f[(df_f["FECHA"] >= d1) & (df_f["FECHA"] <= d2)]
 
-# Mapa proceso
+# Proceso (label bonito)
 proc_map = dict(zip(cat_proceso["ID_PROCESO"], cat_proceso["NOMBRE_PROCESO"]))
 all_proc_ids = sorted(df_f["ID_PROCESO"].dropna().astype(str).unique().tolist())
 proc_labels = ["(Todos)"] + [f"{proc_map.get(pid, 'PROCESO')} [{pid}]" for pid in all_proc_ids]
-proc_label_sel = st.sidebar.selectbox("Proceso", proc_labels, index=0)
-if proc_label_sel != "(Todos)":
-    id_proceso = proc_label_sel.split("[")[-1].replace("]", "").strip()
-    df_f = df_f[df_f["ID_PROCESO"].astype(str) == id_proceso]
 
+proc_label_sel = st.sidebar.selectbox("Proceso", proc_labels, index=0)
+id_proceso_sel = None
+if proc_label_sel != "(Todos)":
+    id_proceso_sel = proc_label_sel.split("[")[-1].replace("]", "").strip()
+    df_f = df_f[df_f["ID_PROCESO"].astype(str) == id_proceso_sel]
+
+# Otros filtros
 cult_opts = ["(Todos)"] + sorted(df_f["CULTIVO"].dropna().astype(str).unique().tolist())
 cult_sel = st.sidebar.selectbox("Cultivo", cult_opts, index=0)
 if cult_sel != "(Todos)":
@@ -276,6 +293,7 @@ def fallas_de_equipo(cod_equipo: str):
     return ev_fallas[ev_fallas["ID_EQUIPO_AFECTADO"].astype(str) == str(cod_equipo)]
 
 if vista_disp == "Sistema (TRC+IMP)":
+    # TO base: IMPLEMENTO (operación neta)
     to_base = to_imp
     dt_base = float(ev_fallas["DT_HR"].sum())
     n_base = int(len(ev_fallas))
@@ -312,65 +330,57 @@ st.caption("INDICADORES DE CONFIABILIDAD - MANTENIBILIDAD - DISPONIBILIDAD")
 st.caption(f"Vista actual de KPIs: **{vista_disp}**")
 
 # =========================================================
-# KPIs (alineados)
+# KPIs (render HTML robusto)
 # =========================================================
 row1 = [
-    metric_html("TO Tractor (h)", fmt_num(to_trac)),
-    metric_html("TO Implemento (h)", fmt_num(to_imp)),
-    metric_html("Downtime Fallas (h)", fmt_num(dt_base)),
-    metric_html("Fallas", f"{n_base:,}"),
+    kpi_card_html("TO Tractor (h)", fmt_num(to_trac)),
+    kpi_card_html("TO Implemento (h)", fmt_num(to_imp)),
+    kpi_card_html("Downtime Fallas (h)", fmt_num(dt_base)),
+    kpi_card_html("Fallas", f"{n_base:,}"),
 ]
-st.markdown("<div class='kpi-row'>" + "".join(row1) + "</div>", unsafe_allow_html=True)
+render_kpi_row(row1, big=False)
 
 mttr_col = mttr_color_3(mttr_hr)
 mtbf_col = mtbf_color(mtbf_hr)
 
 row2 = [
-    metric_html(
+    kpi_card_html(
         "MTTR (h/falla)",
         fmt_num(mttr_hr),
         color=mttr_col,
-        hint="Azul <1.2 | Verde 1.2–2.5 | Rojo >2.5"
+        hint="Azul <1.2 | Verde 1.2–2.5 | Rojo >2.5",
     ),
-    metric_html(
+    kpi_card_html(
         "MTBF (h/falla)",
         fmt_num(mtbf_hr),
         color=mtbf_col,
-        hint="Rojo <100 | Verde 100–500 | Azul >500"
+        hint="Rojo <100 | Verde 100–500 | Azul >500",
     ),
-    metric_html("Disponibilidad", fmt_pct(disp)),
+    kpi_card_html("Disponibilidad", fmt_pct(disp)),
 ]
-st.markdown("<div class='kpi-row small'>" + "".join(row2) + "</div>", unsafe_allow_html=True)
+render_kpi_row(row2, big=True)
 
 st.divider()
 
 # =========================================================
-# EVOLUCIÓN APLICACIÓN POR MES-AÑO (MTTR / MTBF)
+# EVOLUCIÓN POR MES-AÑO (según PROCESO elegido)
 # =========================================================
-st.subheader("Evolución del proceso APLICACIÓN por mes-año (MTTR y MTBF)")
+st.subheader("Evolución por mes-año (MTTR y MTBF)")
 
-# obtener ID de APLICACIÓN
-cat_tmp = cat_proceso.copy()
-cat_tmp["NOMBRE_UP"] = cat_tmp["NOMBRE_PROCESO"].astype(str).str.upper().str.strip()
-id_aplic = cat_tmp.loc[cat_tmp["NOMBRE_UP"] == "APLICACIÓN", "ID_PROCESO"]
-if id_aplic.empty:
-    id_aplic = cat_tmp.loc[cat_tmp["NOMBRE_UP"] == "APLICACION", "ID_PROCESO"]
-
-if id_aplic.empty:
-    st.info("No pude ubicar el proceso APLICACIÓN en CAT_PROCESO.")
+if id_proceso_sel is None:
+    st.info("Selecciona un **Proceso** en el filtro lateral para ver su evolución mensual.")
 else:
-    id_aplic = str(id_aplic.iloc[0])
-
-    # Base con TODOS los filtros actuales, pero forzando PROCESO = APLICACIÓN
     base = turnos.copy()
 
-    # mismo rango de fechas que sidebar
+    # Rango fechas (mismo filtro)
     if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
         d1 = pd.to_datetime(date_range[0])
         d2 = pd.to_datetime(date_range[1])
         base = base[(base["FECHA"] >= d1) & (base["FECHA"] <= d2)]
 
-    # mismos filtros (excepto proceso)
+    # aplicar mismos filtros (ya que quieres que refleje la selección)
+    base = base[base["ID_PROCESO"].astype(str) == str(id_proceso_sel)]
+
     if cult_sel != "(Todos)":
         base = base[base["CULTIVO"].astype(str) == str(cult_sel)]
     if trc_sel != "(Todos)":
@@ -382,17 +392,19 @@ else:
     if turno_sel != "(Todos)":
         base = base[base["TURNO"].astype(str) == str(turno_sel)]
 
-    base = base[base["ID_PROCESO"].astype(str) == id_aplic].copy()
+    proc_name = proc_map.get(str(id_proceso_sel), f"Proceso {id_proceso_sel}")
+    st.caption(f"Proceso seleccionado: **{proc_name}**")
 
     if base.empty:
-        st.info("Con los filtros actuales, no hay turnos del proceso APLICACIÓN.")
+        st.info("Con los filtros actuales, no hay turnos para este proceso.")
     else:
         base["MES"] = base["FECHA"].dt.to_period("M").astype(str)  # YYYY-MM
-
         ids = set(base["ID_TURNO"].astype(str).tolist())
+
         h = horometros[horometros["ID_TURNO"].astype(str).isin(ids)].copy()
         e = eventos[eventos["ID_TURNO"].astype(str).isin(ids)].copy()
 
+        # fallas + DT
         e = e[e["CATEGORIA_EVENTO"] == "FALLA"].copy()
         e["DT_HR"] = pd.to_numeric(e["DT_MIN"], errors="coerce") / 60.0
 
@@ -400,7 +412,7 @@ else:
         turn_mes = base[["ID_TURNO", "MES"]].copy()
         turn_mes["ID_TURNO"] = turn_mes["ID_TURNO"].astype(str)
 
-        # TO por turno según vista
+        # TO por mes según vista
         h2 = h.merge(turn_mes, on="ID_TURNO", how="left")
 
         if vista_disp == "Tractor":
@@ -425,14 +437,14 @@ else:
 
         cA, cB = st.columns(2)
         with cA:
-            fig1 = px.bar(evo, x="MES", y="MTTR_HR", title="MTTR (h/falla) - APLICACIÓN por mes")
+            fig1 = px.bar(evo, x="MES", y="MTTR_HR", title="MTTR (h/falla) por mes")
             fig1.update_layout(xaxis_title="Mes (YYYY-MM)", yaxis_title="MTTR (h/falla)", margin=dict(l=20, r=20, t=45, b=20))
-            st.plotly_chart(fig1, width="stretch")
+            st.plotly_chart(fig1, use_container_width=True)
 
         with cB:
-            fig2 = px.bar(evo, x="MES", y="MTBF_HR", title="MTBF (h/falla) - APLICACIÓN por mes")
+            fig2 = px.bar(evo, x="MES", y="MTBF_HR", title="MTBF (h/falla) por mes")
             fig2.update_layout(xaxis_title="Mes (YYYY-MM)", yaxis_title="MTBF (h/falla)", margin=dict(l=20, r=20, t=45, b=20))
-            st.plotly_chart(fig2, width="stretch")
+            st.plotly_chart(fig2, use_container_width=True)
 
 st.divider()
 
@@ -522,113 +534,21 @@ with colA:
     d = top_df.dropna(subset=["MTTR_HR"]).sort_values("MTTR_HR", ascending=False).head(10)
     fig = px.bar(d, x="MTTR_HR", y="ID_EQUIPO", orientation="h")
     fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
 with colB:
     st.caption("MTBF bajo (peor)")
     d = top_df.dropna(subset=["MTBF_HR"]).sort_values("MTBF_HR", ascending=True).head(10)
     fig = px.bar(d, x="MTBF_HR", y="ID_EQUIPO", orientation="h")
     fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
 with colC:
     st.caption("Disponibilidad baja (peor)")
     d = top_df.dropna(subset=["DISP"]).sort_values("DISP", ascending=True).head(10)
     fig = px.bar(d, x="DISP", y="ID_EQUIPO", orientation="h")
     fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig, width="stretch")
-
-st.divider()
-
-# =========================================================
-# TOP 10 TÉCNICO
-# =========================================================
-st.subheader("Top 10 técnico: SUBSISTEMA / COMPONENTE / PARTE")
-
-ev_f = ev_sel[ev_sel["CATEGORIA_EVENTO"] == "FALLA"].copy()
-if ev_f.empty:
-    st.info("No hay fallas para construir el ranking técnico.")
-else:
-    ev_f["DT_HR"] = pd.to_numeric(ev_f["DT_MIN"], errors="coerce") / 60.0
-
-    # filtro por vista
-    if vista_disp == "Tractor":
-        if trc_sel != "(Todos)":
-            ev_f = ev_f[ev_f["ID_EQUIPO_AFECTADO"].astype(str) == str(trc_sel)]
-        else:
-            trcs = turnos_sel["ID_TRACTOR"].dropna().astype(str).unique().tolist()
-            ev_f = ev_f[ev_f["ID_EQUIPO_AFECTADO"].astype(str).isin(trcs)]
-    elif vista_disp == "Implemento":
-        if imp_sel != "(Todos)":
-            ev_f = ev_f[ev_f["ID_EQUIPO_AFECTADO"].astype(str) == str(imp_sel)]
-        else:
-            imps = turnos_sel["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist()
-            ev_f = ev_f[ev_f["ID_EQUIPO_AFECTADO"].astype(str).isin(imps)]
-
-    if ev_f.empty:
-        st.info("No hay fallas en la vista seleccionada para construir el ranking técnico.")
-    else:
-        fcat = fallas_cat.copy()
-        if "SUB UNIDAD" in fcat.columns:
-            fcat = fcat.rename(columns={"SUB UNIDAD": "SUBSISTEMA"})
-        if "PIEZA" in fcat.columns:
-            fcat = fcat.rename(columns={"PIEZA": "PARTE"})
-
-        ev_f = ev_f.merge(fcat, on="ID_FALLA", how="left")
-
-        metrica = st.selectbox(
-            "Rankear por",
-            ["Downtime (h)", "# Fallas", "MTTR (h/falla)", "MTBF (h/falla)", "Disponibilidad"],
-            index=0,
-            key="metrica_tecnica"
-        )
-
-        to_trac_sel = float(horo_sel.loc[horo_sel["TIPO_EQUIPO"] == "TRACTOR", "TO_HORO"].sum())
-        to_imp_sel = float(horo_sel.loc[horo_sel["TIPO_EQUIPO"] == "IMPLEMENTO", "TO_HORO"].sum())
-        TO_BASE_GLOBAL = to_imp_sel if vista_disp == "Sistema (TRC+IMP)" else (to_trac_sel if vista_disp == "Tractor" else to_imp_sel)
-
-        def rank_group(col_group, titulo):
-            if col_group not in ev_f.columns:
-                st.info(f"No existe columna **{col_group}** en el catálogo.")
-                return
-
-            tmp = ev_f.dropna(subset=[col_group]).copy()
-            if tmp.empty:
-                st.info(f"No hay datos válidos para **{titulo}**.")
-                return
-
-            g = tmp.groupby(col_group, dropna=True).agg(
-                DT_HR=("DT_HR", "sum"),
-                FALLAS=("DT_HR", "size"),
-            ).reset_index()
-
-            g["MTTR_HR"] = np.where(g["FALLAS"] > 0, g["DT_HR"] / g["FALLAS"], np.nan)
-            g["MTBF_HR"] = np.where(g["FALLAS"] > 0, TO_BASE_GLOBAL / g["FALLAS"], np.nan)
-            g["DISP"] = np.where(TO_BASE_GLOBAL > 0, (TO_BASE_GLOBAL - g["DT_HR"]) / TO_BASE_GLOBAL, np.nan)
-
-            if metrica == "Downtime (h)":
-                g["VALOR"] = g["DT_HR"]; asc = False
-            elif metrica == "# Fallas":
-                g["VALOR"] = g["FALLAS"]; asc = False
-            elif metrica == "MTTR (h/falla)":
-                g["VALOR"] = g["MTTR_HR"]; asc = False
-            elif metrica == "MTBF (h/falla)":
-                g["VALOR"] = g["MTBF_HR"]; asc = True
-            else:
-                g["VALOR"] = g["DISP"]; asc = True
-
-            g = g.sort_values("VALOR", ascending=asc).head(10)
-            fig = px.bar(g, x="VALOR", y=col_group, orientation="h", title=titulo)
-            fig.update_layout(margin=dict(l=10, r=10, t=35, b=10))
-            st.plotly_chart(fig, width="stretch")
-
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            rank_group("SUBSISTEMA", "Top 10 por SUBSISTEMA")
-        with c2:
-            rank_group("COMPONENTE", "Top 10 por COMPONENTE")
-        with c3:
-            rank_group("PARTE", "Top 10 por PARTE")
+    st.plotly_chart(fig, use_container_width=True)
 
 st.divider()
 
