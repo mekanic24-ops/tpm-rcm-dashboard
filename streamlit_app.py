@@ -892,85 +892,95 @@ else:
 
     st.divider()
 
-    # =============================
-    # Heatmap (Equipos vs Nivel técnico)
-    # =============================
-    st.subheader("Mapa de calor (Riesgo global) — Down Time (h)")
-    equipo_col = fd_view.get("__EQUIPO_COL__", None)
-    if equipo_col is None or equipo_col not in fd_view.columns:
-        equipo_col = find_first_col(fd_view, ["EQUIPO", "ID_EQUIPO", "ID_EQUIPO_AFECTADO"])
+# =============================
+# Heatmap (Equipos vs Nivel técnico)
+# =============================
+st.subheader("Mapa de calor (Riesgo global) — Down Time (h)")
 
-    y_col = hm_y_level
+# 1) Detectar columna de Equipo (string)
+equipo_col = None
+if "__EQUIPO_COL__" in fd_view.columns:
+    try:
+        equipo_col = str(fd_view["__EQUIPO_COL__"].dropna().iloc[0]).strip()
+    except Exception:
+        equipo_col = None
 
-    if equipo_col is None:
-        st.info("No encontré columna de **Equipo** para el heatmap.")
-        st.stop()
+# Fallback: buscar en columnas típicas
+if not equipo_col or equipo_col not in fd_view.columns:
+    equipo_col = find_first_col(fd_view, ["EQUIPO", "ID_EQUIPO", "ID_EQUIPO_AFECTADO"])
 
-    if y_col not in fd_view.columns:
-        st.info(f"No encontré la columna **{y_col}** para el heatmap.")
-        st.stop()
+y_col = hm_y_level
 
-    hm = fd_view.copy()
-    hm[equipo_col] = hm[equipo_col].astype(str).str.strip()
-    hm[y_col] = hm[y_col].astype(str).str.strip()
-    hm["DOWNTIME_HR"] = pd.to_numeric(hm["DOWNTIME_HR"], errors="coerce").fillna(0.0)
+if equipo_col is None:
+    st.info("No encontré columna de **Equipo** para el heatmap (EQUIPO / ID_EQUIPO / ID_EQUIPO_AFECTADO).")
+    st.stop()
 
-    hm = hm[(hm[equipo_col] != "") & (hm[y_col] != "")]
-    if hm.empty:
-        st.info("No hay datos suficientes para el heatmap con los filtros actuales.")
-        st.stop()
+if y_col not in fd_view.columns:
+    st.info(f"No encontré la columna **{y_col}** para el heatmap.")
+    st.stop()
 
-    # Reducir dimensión
-    top_e = (
-        hm.groupby(equipo_col, dropna=True)["DOWNTIME_HR"].sum()
-        .sort_values(ascending=False)
-        .head(int(hm_top_equipos))
-        .index.tolist()
+hm = fd_view.copy()
+hm[equipo_col] = hm[equipo_col].astype(str).str.strip()
+hm[y_col] = hm[y_col].astype(str).str.strip()
+hm["DOWNTIME_HR"] = pd.to_numeric(hm["DOWNTIME_HR"], errors="coerce").fillna(0.0)
+
+hm = hm[(hm[equipo_col] != "") & (hm[y_col] != "")]
+if hm.empty:
+    st.info("No hay datos suficientes para el heatmap con los filtros actuales.")
+    st.stop()
+
+# Reducir dimensión
+top_e = (
+    hm.groupby(equipo_col, dropna=True)["DOWNTIME_HR"].sum()
+    .sort_values(ascending=False)
+    .head(int(hm_top_equipos))
+    .index.tolist()
+)
+top_y = (
+    hm.groupby(y_col, dropna=True)["DOWNTIME_HR"].sum()
+    .sort_values(ascending=False)
+    .head(int(hm_top_y))
+    .index.tolist()
+)
+hm = hm[hm[equipo_col].isin(top_e) & hm[y_col].isin(top_y)].copy()
+
+mat = hm.pivot_table(
+    index=y_col,
+    columns=equipo_col,
+    values="DOWNTIME_HR",
+    aggfunc="sum",
+    fill_value=0.0
+)
+
+# Orden por impacto
+mat = mat.loc[mat.sum(axis=1).sort_values(ascending=False).index]
+mat = mat[mat.sum(axis=0).sort_values(ascending=False).index]
+
+fig = go.Figure(
+    data=go.Heatmap(
+        z=mat.values,
+        x=mat.columns.tolist(),
+        y=mat.index.tolist(),
+        colorbar=dict(title="Downtime (h)"),
+        hovertemplate=f"{y_col}: %{{y}}<br>Equipo: %{{x}}<br>Downtime: %{{z:.2f}} h<extra></extra>",
     )
-    top_y = (
-        hm.groupby(y_col, dropna=True)["DOWNTIME_HR"].sum()
-        .sort_values(ascending=False)
-        .head(int(hm_top_y))
-        .index.tolist()
-    )
-    hm = hm[hm[equipo_col].isin(top_e) & hm[y_col].isin(top_y)].copy()
+)
 
-    mat = hm.pivot_table(
-        index=y_col,
-        columns=equipo_col,
-        values="DOWNTIME_HR",
-        aggfunc="sum",
-        fill_value=0.0
+if hm_show_values:
+    fig.update_traces(
+        text=np.round(mat.values, 1),
+        texttemplate="%{text}",
+        textfont=dict(size=10),
     )
 
-    # Orden por impacto
-    mat = mat.loc[mat.sum(axis=1).sort_values(ascending=False).index]
-    mat = mat[mat.sum(axis=0).sort_values(ascending=False).index]
+fig.update_layout(
+    title=f"Heatmap — Downtime (h) por Equipo vs {y_col}",
+    title_x=0.5,
+    height=650,
+    margin=dict(l=30, r=20, t=60, b=120),
+    xaxis=dict(title="Equipos", tickangle=-45),
+    yaxis=dict(title=y_col),
+)
 
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=mat.values,
-            x=mat.columns.tolist(),
-            y=mat.index.tolist(),
-            colorbar=dict(title="Downtime (h)"),
-            hovertemplate=f"{y_col}: %{{y}}<br>Equipo: %{{x}}<br>Downtime: %{{z:.2f}} h<extra></extra>",
-        )
-    )
+st.plotly_chart(fig, use_container_width=True)
 
-    if hm_show_values:
-        fig.update_traces(
-            text=np.round(mat.values, 1),
-            texttemplate="%{text}",
-            textfont=dict(size=10),
-        )
-
-    fig.update_layout(
-        title=f"Heatmap — Downtime (h) por Equipo vs {y_col}",
-        title_x=0.5,
-        height=650,
-        margin=dict(l=30, r=20, t=60, b=120),
-        xaxis=dict(title="Equipos", tickangle=-45),
-        yaxis=dict(title=y_col),
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
