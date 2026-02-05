@@ -7,8 +7,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit.components.v1 as components
+
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # =========================================================
 # CONFIG
@@ -32,7 +34,6 @@ def ensure_data_unzipped():
     with zipfile.ZipFile(zip_path, "r") as z:
         z.extractall(DATA_DIR)
 
-
 def norm_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = (
@@ -45,17 +46,14 @@ def norm_cols(df: pd.DataFrame) -> pd.DataFrame:
     )
     return df
 
-
 def find_first_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     for c in candidates:
         if c in df.columns:
             return c
     return None
 
-
 def safe_norm_str_series(s: pd.Series) -> pd.Series:
     return s.astype(str).str.replace(".0", "", regex=False).str.strip()
-
 
 def infer_tipo_equipo_from_code(x: str) -> Optional[str]:
     if x is None or (isinstance(x, float) and np.isnan(x)):
@@ -65,16 +63,14 @@ def infer_tipo_equipo_from_code(x: str) -> Optional[str]:
         return "TRACTOR"
     return "IMPLEMENTO"
 
-
 def _coerce_downtime_to_hr(x: pd.Series) -> pd.Series:
-    """Convierte a horas; si parece estar en minutos, divide entre 60 (heurística p95)."""
+    """Convierte una serie a horas; si parece estar en minutos, divide entre 60."""
     v = pd.to_numeric(x, errors="coerce")
     if v.notna().any():
         p95 = np.nanpercentile(v.dropna(), 95)
-        if pd.notna(p95) and p95 > 240:  # >240h es raro; en minutos sería >14400
+        if pd.notna(p95) and p95 > 240:
             v = v / 60.0
     return v
-
 
 @st.cache_data(show_spinner=False)
 def load_tables() -> dict:
@@ -148,7 +144,7 @@ def load_tables() -> dict:
             if c in fallas_detalle.columns:
                 fallas_detalle[c] = norm_str(fallas_detalle[c])
 
-        # 3) Downtime: T_FALLA / etc -> DOWNTIME_HR (min->hr)
+        # 3) Downtime -> DOWNTIME_HR
         if "DOWNTIME_HR" in fallas_detalle.columns:
             fallas_detalle["DOWNTIME_HR"] = _coerce_downtime_to_hr(fallas_detalle["DOWNTIME_HR"])
         else:
@@ -177,18 +173,16 @@ def load_tables() -> dict:
             if src in fallas_detalle.columns and dst not in fallas_detalle.columns:
                 fallas_detalle[dst] = fallas_detalle[src]
 
-        # 5) Si no hay TIPO_EQUIPO, inferir por EQUIPO
+        # 5) Si no hay TIPO_EQUIPO, inferimos
         eq_col = find_first_col(fallas_detalle, ["EQUIPO", "ID_EQUIPO", "ID_EQUIPO_AFECTADO"])
-        if "TIPO_EQUIPO" not in fallas_detalle.columns or fallas_detalle["TIPO_EQUIPO"].isna().all():
+        if ("TIPO_EQUIPO" not in fallas_detalle.columns) or fallas_detalle["TIPO_EQUIPO"].isna().all():
             if eq_col is not None:
                 fallas_detalle["TIPO_EQUIPO"] = fallas_detalle[eq_col].apply(infer_tipo_equipo_from_code)
         else:
             fallas_detalle["TIPO_EQUIPO"] = fallas_detalle["TIPO_EQUIPO"].astype(str).str.upper().str.strip()
             mask_bad = fallas_detalle["TIPO_EQUIPO"].isin(["", "NAN", "NONE"])
             if mask_bad.any() and eq_col is not None:
-                fallas_detalle.loc[mask_bad, "TIPO_EQUIPO"] = fallas_detalle.loc[mask_bad, eq_col].apply(
-                    infer_tipo_equipo_from_code
-                )
+                fallas_detalle.loc[mask_bad, "TIPO_EQUIPO"] = fallas_detalle.loc[mask_bad, eq_col].apply(infer_tipo_equipo_from_code)
 
     return {
         "turnos": turnos,
@@ -201,7 +195,6 @@ def load_tables() -> dict:
         "fallas_detalle": fallas_detalle,
     }
 
-
 def normalize_cultivo(x) -> Optional[str]:
     if x is None or (isinstance(x, float) and np.isnan(x)):
         return None
@@ -213,7 +206,6 @@ def normalize_cultivo(x) -> Optional[str]:
         return "ARANDANO"
     return s
 
-
 def normalize_turno(x) -> Optional[str]:
     if x is None or (isinstance(x, float) and np.isnan(x)):
         return None
@@ -224,7 +216,6 @@ def normalize_turno(x) -> Optional[str]:
     if s in ["N", "NOCHE", "NIGHT"]:
         return "NOCHE"
     return s
-
 
 def build_enriched_turnos(turnos, operadores, lotes):
     t = turnos.copy()
@@ -239,9 +230,7 @@ def build_enriched_turnos(turnos, operadores, lotes):
         t["TURNO_NORM"] = t["TURNO"].apply(normalize_turno)
     else:
         t["TURNO_NORM"] = None
-
     return t
-
 
 def mttr_color_3(v):
     if v is None or pd.isna(v):
@@ -252,7 +241,6 @@ def mttr_color_3(v):
         return "#2ca02c"
     return "#d62728"
 
-
 def mtbf_color(v):
     if v is None or pd.isna(v):
         return None
@@ -261,7 +249,6 @@ def mtbf_color(v):
     if 100 <= v <= 500:
         return "#2ca02c"
     return "#1f77b4"
-
 
 def disp_color(d):
     if d is None or pd.isna(d):
@@ -273,18 +260,15 @@ def disp_color(d):
         return "#2ca02c"
     return "#1f77b4"
 
-
 def fmt_num(x, dec=2):
     if x is None or pd.isna(x):
         return "—"
     return f"{x:,.{dec}f}"
 
-
 def fmt_pct(x, dec=2):
     if x is None or pd.isna(x):
         return "—"
     return f"{x*100:,.{dec}f}%"
-
 
 def kpi_card_html(title: str, value: str, color: Optional[str] = None, hint: Optional[str] = None) -> str:
     val_style = "color:#111;"
@@ -298,7 +282,6 @@ def kpi_card_html(title: str, value: str, color: Optional[str] = None, hint: Opt
         <div class="kpi-hint">{hint_text}</div>
       </div>
     """
-
 
 def render_kpi_row(cards_html: List[str], big: bool = False):
     row_class = "kpi-row big" if big else "kpi-row"
@@ -328,58 +311,60 @@ def render_kpi_row(cards_html: List[str], big: bool = False):
     """
     components.html(html, height=185 if big else 175)
 
-
 def center_title(txt: str) -> str:
     return f"<div style='text-align:center;font-weight:800;font-size:18px;margin:0 0 4px 0;'>{txt}</div>"
 
-
-def build_pareto_df(df: pd.DataFrame, col: str, value_col: str = "DOWNTIME_HR", top_n: int = 10) -> pd.DataFrame:
-    g = (
-        df.groupby(col, dropna=True)[value_col]
-        .sum()
-        .reset_index()
-        .rename(columns={value_col: "VAL"})
-    )
-    g[col] = g[col].astype(str).str.strip()
-    g = g[g[col].ne("")].copy()
-    g = g.sort_values("VAL", ascending=False)
-    if top_n is not None:
-        g = g.head(int(top_n))
-    g["ACUM"] = g["VAL"].cumsum()
-    total = g["VAL"].sum()
-    g["ACUM_PCT"] = np.where(total > 0, g["ACUM"] / total, np.nan)
-    return g
-
-
-def plot_pareto(df_p: pd.DataFrame, cat_col: str, title: str):
-    if df_p.empty:
-        st.info(f"No hay datos para Pareto: {title}")
+def pareto_chart(df: pd.DataFrame, group_col: str, value_col: str, top_n: int, title: str):
+    """
+    Pareto completo:
+      - Barras: valor (DT)
+      - Línea: % acumulado
+    """
+    if group_col not in df.columns:
+        st.info(f"No existe la columna **{group_col}**.")
         return
 
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=df_p[cat_col], y=df_p["VAL"], name="Downtime (h)"))
+    g = (
+        df.groupby(group_col, dropna=True)[value_col].sum()
+        .reset_index()
+        .sort_values(value_col, ascending=False)
+    )
+    g[group_col] = g[group_col].astype(str).replace({"nan": "(Vacío)", "None": "(Vacío)"})
+    g = g[g[group_col].str.strip() != ""]
+    if g.empty:
+        st.info(f"Sin datos para Pareto: **{title}**.")
+        return
+
+    g = g.head(int(top_n)).copy()
+    total = g[value_col].sum()
+    g["CUM"] = g[value_col].cumsum()
+    g["CUM_PCT"] = np.where(total > 0, g["CUM"] / total * 100.0, np.nan)
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(
-        go.Scatter(
-            x=df_p[cat_col],
-            y=df_p["ACUM_PCT"],
-            name="% acumulado",
-            yaxis="y2",
-            mode="lines+markers",
-        )
+        go.Bar(x=g[group_col], y=g[value_col], name="Down Time (h)"),
+        secondary_y=False
+    )
+    fig.add_trace(
+        go.Scatter(x=g[group_col], y=g["CUM_PCT"], name="% acumulado", mode="lines+markers"),
+        secondary_y=True
     )
 
     fig.update_layout(
         title=title,
         title_x=0.5,
-        margin=dict(l=30, r=30, t=60, b=120),
-        height=420,
-        xaxis=dict(title="", tickangle=-35),
-        yaxis=dict(title="Downtime (h)"),
-        yaxis2=dict(title="% acumulado", overlaying="y", side="right", tickformat=".0%"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=20, r=20, t=60, b=80),
+        xaxis_tickangle=-35,
+        legend_orientation="h",
+        legend_yanchor="bottom",
+        legend_y=1.02,
+        legend_xanchor="left",
+        legend_x=0,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    fig.update_yaxes(title_text="Down Time (h)", secondary_y=False)
+    fig.update_yaxes(title_text="% acumulado", secondary_y=True, range=[0, 110])
 
+    st.plotly_chart(fig, width="stretch")
 
 # =========================================================
 # LOAD
@@ -394,10 +379,10 @@ fallas_detalle = tables["fallas_detalle"]
 proc_map: Dict[str, str] = dict(zip(cat_proceso["ID_PROCESO"].astype(str), cat_proceso["NOMBRE_PROCESO"].astype(str)))
 
 # =========================================================
-# SIDEBAR: NAV + FILTERS
+# SIDEBAR NAV + FILTROS
 # =========================================================
 st.sidebar.header("Navegación")
-page = st.sidebar.radio("Página", ["Dashboard", "Paretos"], index=0, key="page")
+page = st.sidebar.radio("Página", ["Dashboard", "Paretos"], index=0, key="page_sel")
 
 st.sidebar.divider()
 st.sidebar.header("Filtros")
@@ -416,7 +401,6 @@ if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
     d2 = pd.to_datetime(date_range[1])
     df_base = df_base[(df_base["FECHA"] >= d1) & (df_base["FECHA"] <= d2)]
 
-# Cultivo
 cult_label_to_val = {"(Todos)": None, "Palto": "PALTO", "Arandano": "ARANDANO"}
 cult_choice = st.sidebar.radio("Cultivo", ["(Todos)", "Palto", "Arandano"], index=0, key="cult_btn")
 cult_sel = cult_label_to_val[cult_choice]
@@ -424,14 +408,12 @@ df_tmp = df_base.copy()
 if cult_sel:
     df_tmp = df_tmp[df_tmp["CULTIVO"] == cult_sel]
 
-# Turno
 turn_label_to_val = {"(Todos)": None, "Día": "DIA", "Noche": "NOCHE"}
 turn_choice = st.sidebar.radio("Turno", ["(Todos)", "Día", "Noche"], index=0, key="turn_btn")
 turn_sel = turn_label_to_val[turn_choice]
 if turn_sel:
     df_tmp = df_tmp[df_tmp["TURNO_NORM"] == turn_sel]
 
-# Tractor / Implemento
 trc_opts = ["(Todos)"] + sorted(df_tmp["ID_TRACTOR"].dropna().astype(str).unique().tolist())
 trc_sel = st.sidebar.selectbox("Tractor", trc_opts, index=0, key="trc_sel")
 if trc_sel != "(Todos)":
@@ -442,7 +424,7 @@ imp_sel = st.sidebar.selectbox("Implemento", imp_opts, index=0, key="imp_sel")
 if imp_sel != "(Todos)":
     df_tmp = df_tmp[df_tmp["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
 
-# Proceso (ordenado por TO implemento)
+# Proceso ordenado por TO implemento
 ids_for_rank = set(df_tmp["ID_TURNO"].astype(str).tolist())
 h_rank = horometros[horometros["ID_TURNO"].astype(str).isin(ids_for_rank)].copy()
 h_rank = h_rank[h_rank["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
@@ -484,7 +466,7 @@ vista_disp = st.sidebar.radio(
 )
 
 # =========================================================
-# SELECCIÓN FINAL (SIEMPRE CON FILTROS)
+# SELECCIÓN FINAL (según filtros)
 # =========================================================
 turnos_sel = df_f.copy()
 ids_turno = set(turnos_sel["ID_TURNO"].astype(str).tolist())
@@ -497,11 +479,10 @@ if fallas_detalle is not None:
     if "ID_TURNO" in fallas_detalle.columns:
         fd_sel = fallas_detalle[fallas_detalle["ID_TURNO"].astype(str).isin(ids_turno)].copy()
     else:
-        # Si por alguna razón no existe ID_TURNO, igual se muestra (pero no será sensible al rango)
         fd_sel = fallas_detalle.copy()
 
 # =========================================================
-# KPI GLOBAL (para Dashboard)
+# KPI GLOBAL
 # =========================================================
 to_trac = float(horo_sel.loc[horo_sel["TIPO_EQUIPO"].astype(str).str.upper() == "TRACTOR", "TO_HORO"].sum())
 to_imp = float(horo_sel.loc[horo_sel["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO", "TO_HORO"].sum())
@@ -542,92 +523,14 @@ mttr_hr = (dt_base / n_base) if n_base > 0 else np.nan
 mtbf_hr = (to_base / n_base) if n_base > 0 else np.nan
 disp = (to_base / (to_base + dt_base)) if (to_base is not None and (to_base + dt_base) > 0) else np.nan
 
-
 # =========================================================
-# CONSTRUIR fd_view (USADO EN Dashboard y en Paretos)
-#   - sensible a rango de fechas porque parte de fd_sel (filtrado por ids_turno)
-#   - sensible a TRC/IMP y vista
-# =========================================================
-def build_fd_view(fd_sel: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
-    if fd_sel is None:
-        return None
-
-    fd = norm_cols(fd_sel)
-
-    # Asegurar ID_TURNO si viene como ID
-    if "ID_TURNO" not in fd.columns and "ID" in fd.columns:
-        fd["ID_TURNO"] = safe_norm_str_series(fd["ID"])
-
-    # Asegurar DOWNTIME_HR
-    if "DOWNTIME_HR" not in fd.columns:
-        tf = find_first_col(fd, ["T_FALLA", "TFALLA", "TIEMPO_FALLA", "TIEMPO_DE_FALLA", "DOWNTIME", "DT_HR"])
-        if tf is not None:
-            fd["DOWNTIME_HR"] = _coerce_downtime_to_hr(fd[tf])
-        else:
-            fd["DOWNTIME_HR"] = np.nan
-    else:
-        fd["DOWNTIME_HR"] = _coerce_downtime_to_hr(fd["DOWNTIME_HR"])
-
-    # Aliases mínimos por si acaso
-    if "SUBUNIDAD" not in fd.columns and "SUB_UNIDAD" in fd.columns:
-        fd["SUBUNIDAD"] = fd["SUB_UNIDAD"]
-    if "PARTE" not in fd.columns and "PIEZA" in fd.columns:
-        fd["PARTE"] = fd["PIEZA"]
-    if "CAUSA_FALLA" not in fd.columns and "CAUSA" in fd.columns:
-        fd["CAUSA_FALLA"] = fd["CAUSA"]
-
-    # Columna de equipo
-    equipo_col = find_first_col(fd, ["EQUIPO", "ID_EQUIPO", "ID_EQUIPO_AFECTADO"])
-    if equipo_col is None:
-        fd["__EQUIPO__"] = None
-        equipo_col = "__EQUIPO__"
-
-    # TIPO_EQUIPO
-    if "TIPO_EQUIPO" not in fd.columns or fd["TIPO_EQUIPO"].isna().all():
-        fd["TIPO_EQUIPO"] = fd[equipo_col].apply(infer_tipo_equipo_from_code)
-    else:
-        fd["TIPO_EQUIPO"] = fd["TIPO_EQUIPO"].astype(str).str.upper().str.strip()
-        mask_bad = fd["TIPO_EQUIPO"].isin(["", "NAN", "NONE"])
-        if mask_bad.any():
-            fd.loc[mask_bad, "TIPO_EQUIPO"] = fd.loc[mask_bad, equipo_col].apply(infer_tipo_equipo_from_code)
-
-    # Filtro fino por selección TRC/IMP + vista
-    fd_view = fd.copy()
-
-    allowed_equipos = []
-    if trc_sel != "(Todos)":
-        allowed_equipos.append(str(trc_sel).upper())
-    if imp_sel != "(Todos)":
-        allowed_equipos.append(str(imp_sel).upper())
-
-    if allowed_equipos and equipo_col != "__EQUIPO__":
-        fd_view = fd_view[fd_view[equipo_col].astype(str).str.upper().isin(allowed_equipos)].copy()
-
-    if vista_disp == "Tractor":
-        fd_view = fd_view[fd_view["TIPO_EQUIPO"] == "TRACTOR"].copy()
-    elif vista_disp == "Implemento":
-        fd_view = fd_view[fd_view["TIPO_EQUIPO"] == "IMPLEMENTO"].copy()
-
-    fd_view["DOWNTIME_HR"] = pd.to_numeric(fd_view["DOWNTIME_HR"], errors="coerce").fillna(0.0)
-    fd_view["__EQUIPO_COL__"] = equipo_col  # guardamos para reutilizar
-    return fd_view
-
-fd_view = build_fd_view(fd_sel)
-
-# =========================================================
-# PÁGINAS
+# PÁGINA: DASHBOARD
 # =========================================================
 if page == "Dashboard":
-    # =========================================================
-    # TITULOS
-    # =========================================================
     st.title("DESEMPEÑO OPERACIONAL DE LA FLOTA")
     st.caption("INDICADORES DE CONFIABILIDAD - MANTENIBILIDAD - DISPONIBILIDAD")
     st.caption(f"Vista actual de KPIs: **{vista_disp}**")
 
-    # =========================================================
-    # KPIs
-    # =========================================================
     row1 = [
         kpi_card_html("Tiempo de Operación (h)", fmt_num(to_base)),
         kpi_card_html("Downtime Fallas (h)", fmt_num(dt_base)),
@@ -717,88 +620,40 @@ if page == "Dashboard":
         evo["DISP"] = np.where((evo["TO_HR"] + evo["DT_HR"]) > 0, evo["TO_HR"] / (evo["TO_HR"] + evo["DT_HR"]), np.nan)
         evo = evo.sort_values("MES", ascending=True)
 
-        # FILA 1
         r1c1, r1c2 = st.columns(2)
         with r1c1:
             fig1 = px.bar(evo, x="MES", y="MTTR_HR", title="MTTR (h/falla) por mes")
             fig1.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            st.plotly_chart(fig1, use_container_width=True)
+            st.plotly_chart(fig1, width="stretch")
         with r1c2:
             fig2 = px.bar(evo, x="MES", y="MTBF_HR", title="MTBF (h/falla) por mes")
             fig2.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, width="stretch")
 
-        # FILA 2
         r2c1, r2c2 = st.columns(2)
         with r2c1:
             fig3 = px.bar(evo, x="MES", y="DISP", title="Disponibilidad (TO/(TO+DT)) por mes")
             fig3.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20), yaxis_tickformat=".0%")
-            st.plotly_chart(fig3, use_container_width=True)
+            st.plotly_chart(fig3, width="stretch")
         with r2c2:
             fig4 = px.bar(evo, x="MES", y="FALLAS", title="Cantidad de fallas por mes")
             fig4.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            st.plotly_chart(fig4, use_container_width=True)
+            st.plotly_chart(fig4, width="stretch")
 
-        # FILA 3
         r3c1, r3c2 = st.columns(2)
         with r3c1:
             fig5 = px.bar(evo, x="MES", y="TO_HR", title="Tiempo de Operación (TO) por mes (h)")
             fig5.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            st.plotly_chart(fig5, use_container_width=True)
+            st.plotly_chart(fig5, width="stretch")
         with r3c2:
             fig6 = px.bar(evo, x="MES", y="DT_HR", title="Down Time por mes (h)")
             fig6.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            st.plotly_chart(fig6, use_container_width=True)
+            st.plotly_chart(fig6, width="stretch")
 
     st.divider()
 
-    # =========================================================
-    # TOP 10 TÉCNICO (BARRAS) - sigue en Dashboard
-    # =========================================================
-    st.subheader("Top 10 Técnico (Subunidad / Componente / Parte / Verbo / Causa) por Tiempo de Falla (h)")
-
-    if fd_view is None:
-        st.info("No se encontró **FALLAS_DETALLE_NORMALIZADO.csv** dentro del ZIP (data_normalizada/).")
-    elif fd_view.empty:
-        st.info("Con los filtros actuales, no hay registros en FALLAS_DETALLE para construir el Top 10 técnico.")
-    else:
-        def top10_bar(df, col, title):
-            if col not in df.columns:
-                st.info(f"No existe la columna **{col}** en FALLAS_DETALLE_NORMALIZADO.")
-                return
-            g = (
-                df.groupby(col, dropna=True)["DOWNTIME_HR"].sum()
-                .reset_index()
-                .sort_values("DOWNTIME_HR", ascending=False)
-                .head(10)
-            )
-            g[col] = g[col].astype(str)
-            fig = px.bar(g, x="DOWNTIME_HR", y=col, orientation="h")
-            fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Tiempo de Falla (h)", yaxis_title="")
-            st.markdown(center_title(title), unsafe_allow_html=True)
-            st.plotly_chart(fig, use_container_width=True)
-
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            top10_bar(fd_view, "SUBUNIDAD", "Top 10 SUBUNIDAD")
-        with c2:
-            top10_bar(fd_view, "COMPONENTE", "Top 10 COMPONENTE")
-        with c3:
-            top10_bar(fd_view, "PARTE", "Top 10 PARTE")
-
-        c4, c5 = st.columns(2)
-        with c4:
-            top10_bar(fd_view, "VERBO_TECNICO", "Top 10 VERBO TÉCNICO")
-        with c5:
-            top10_bar(fd_view, "CAUSA_FALLA", "Top 10 CAUSA DE FALLA")
-
-    st.divider()
-
-    # =========================================================
-    # DESCARGAS
-    # =========================================================
+    # DESCARGAS (dashboard)
     st.subheader("Descargar datos filtrados")
-
     st.download_button(
         "Descargar TURNOS filtrado (CSV)",
         data=turnos_sel.to_csv(index=False).encode("utf-8-sig"),
@@ -817,7 +672,6 @@ if page == "Dashboard":
         file_name="EVENTOS_filtrado.csv",
         mime="text/csv",
     )
-
     if fd_sel is not None:
         st.download_button(
             "Descargar FALLAS_DETALLE filtrado (CSV)",
@@ -826,161 +680,161 @@ if page == "Dashboard":
             mime="text/csv",
         )
 
-
 # =========================================================
 # PÁGINA: PARETOS
 # =========================================================
 else:
-    st.title("Paretos")
-    st.caption("Análisis tipo Pareto basado en **Down Time (h)** de FALLAS_DETALLE_NORMALIZADO, sensible a filtros.")
+    st.title("Paretos de Fallas + Mapa de calor (Riesgo global)")
+    st.caption("Análisis por Down Time (h) con Pareto completo y heatmap Equipo vs Sistema.")
 
-    if fd_view is None:
+    if fd_sel is None:
         st.info("No se encontró **FALLAS_DETALLE_NORMALIZADO.csv** dentro del ZIP (data_normalizada/).")
         st.stop()
+
+    fd_view = norm_cols(fd_sel.copy())
+
+    # Asegurar ID_TURNO
+    if "ID_TURNO" not in fd_view.columns and "ID" in fd_view.columns:
+        fd_view["ID_TURNO"] = safe_norm_str_series(fd_view["ID"])
+
+    # Downtime
+    if "DOWNTIME_HR" not in fd_view.columns:
+        tf = find_first_col(fd_view, ["T_FALLA", "TFALLA", "TIEMPO_FALLA", "TIEMPO_DE_FALLA", "DOWNTIME", "DT_HR"])
+        if tf is not None:
+            fd_view["DOWNTIME_HR"] = _coerce_downtime_to_hr(fd_view[tf])
+        else:
+            fd_view["DOWNTIME_HR"] = np.nan
+    fd_view["DOWNTIME_HR"] = pd.to_numeric(fd_view["DOWNTIME_HR"], errors="coerce").fillna(0.0)
+
+    # Aliases mínimos (por si acaso)
+    if "SUBUNIDAD" not in fd_view.columns and "SUB_UNIDAD" in fd_view.columns:
+        fd_view["SUBUNIDAD"] = fd_view["SUB_UNIDAD"]
+    if "PARTE" not in fd_view.columns and "PIEZA" in fd_view.columns:
+        fd_view["PARTE"] = fd_view["PIEZA"]
+    if "CAUSA_FALLA" not in fd_view.columns and "CAUSA" in fd_view.columns:
+        fd_view["CAUSA_FALLA"] = fd_view["CAUSA"]
+
+    # Columna equipo
+    equipo_col = find_first_col(fd_view, ["EQUIPO", "ID_EQUIPO", "ID_EQUIPO_AFECTADO"])
+
+    # Asegurar TIPO_EQUIPO y aplicar filtros de vista (si corresponde)
+    if "TIPO_EQUIPO" not in fd_view.columns or fd_view["TIPO_EQUIPO"].isna().all():
+        if equipo_col is not None:
+            fd_view["TIPO_EQUIPO"] = fd_view[equipo_col].apply(infer_tipo_equipo_from_code)
+    else:
+        fd_view["TIPO_EQUIPO"] = fd_view["TIPO_EQUIPO"].astype(str).str.upper().str.strip()
+
+    # Filtrado por selección específica TRC/IMP
+    allowed_equipos = []
+    if trc_sel != "(Todos)":
+        allowed_equipos.append(str(trc_sel).upper())
+    if imp_sel != "(Todos)":
+        allowed_equipos.append(str(imp_sel).upper())
+
+    if equipo_col is not None and allowed_equipos:
+        fd_view = fd_view[fd_view[equipo_col].astype(str).str.upper().isin(allowed_equipos)].copy()
+
+    # Filtrado por vista
+    if vista_disp == "Tractor" and "TIPO_EQUIPO" in fd_view.columns:
+        fd_view = fd_view[fd_view["TIPO_EQUIPO"] == "TRACTOR"].copy()
+    elif vista_disp == "Implemento" and "TIPO_EQUIPO" in fd_view.columns:
+        fd_view = fd_view[fd_view["TIPO_EQUIPO"] == "IMPLEMENTO"].copy()
 
     if fd_view.empty:
         st.info("Con los filtros actuales, no hay registros en FALLAS_DETALLE para construir Paretos/Heatmap.")
         st.stop()
 
-    # =============================
-    # Sidebar: configuración Paretos + Heatmap
-    # =============================
-    st.sidebar.divider()
-    st.sidebar.header("Paretos")
+    # =========================
+    # PARETOS
+    # =========================
+    st.subheader("Paretos (Down Time h)")
 
-    pareto_top_n = st.sidebar.slider("Top N (Pareto)", min_value=5, max_value=50, value=15, step=5, key="pareto_top_n")
+    top_n = st.slider("Top N (Pareto)", min_value=5, max_value=40, value=10, step=1, key="pareto_topn")
 
-    st.sidebar.divider()
-    st.sidebar.header("Heatmap (Riesgo global)")
+    # 3 arriba
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        pareto_chart(fd_view, "SUBUNIDAD", "DOWNTIME_HR", top_n, f"Pareto SUBUNIDAD (Top {top_n})")
+    with c2:
+        pareto_chart(fd_view, "COMPONENTE", "DOWNTIME_HR", top_n, f"Pareto COMPONENTE (Top {top_n})")
+    with c3:
+        pareto_chart(fd_view, "PARTE", "DOWNTIME_HR", top_n, f"Pareto PARTE (Top {top_n})")
 
-    hm_y_level = st.sidebar.selectbox(
-        "Nivel técnico (Eje Y)",
-        ["SUBUNIDAD", "COMPONENTE", "PARTE"],
-        index=0,
-        key="hm_y_level",
-    )
-    hm_top_equipos = st.sidebar.slider("Top Equipos (por Downtime)", 10, 200, 50, 10, key="hm_top_equipos")
-    hm_top_y = st.sidebar.slider(f"Top {hm_y_level} (por Downtime)", 5, 120, 25, 5, key="hm_top_y")
-    hm_show_values = st.sidebar.checkbox("Mostrar valores (h) en celdas", value=False, key="hm_show_values")
-
-    # =============================
-    # Paretos (completos)
-    # =============================
-    st.subheader("Paretos por Downtime (h)")
-
-    cols = [
-        ("SUBUNIDAD", "Pareto — Subunidad"),
-        ("COMPONENTE", "Pareto — Componente"),
-        ("PARTE", "Pareto — Parte"),
-        ("VERBO_TECNICO", "Pareto — Verbo técnico"),
-        ("CAUSA_FALLA", "Pareto — Causa de falla"),
-    ]
-
-    # 3 arriba + 2 abajo
-    r1c1, r1c2, r1c3 = st.columns(3)
-    r2c1, r2c2 = st.columns(2)
-
-    slots = [r1c1, r1c2, r1c3, r2c1, r2c2]
-
-    for (col, title), slot in zip(cols, slots):
-        with slot:
-            if col not in fd_view.columns:
-                st.info(f"No existe la columna **{col}** para {title}.")
-            else:
-                df_p = build_pareto_df(fd_view, col=col, value_col="DOWNTIME_HR", top_n=pareto_top_n)
-                plot_pareto(df_p, cat_col=col, title=title)
+    # 2 abajo
+    c4, c5 = st.columns(2)
+    with c4:
+        pareto_chart(fd_view, "VERBO_TECNICO", "DOWNTIME_HR", top_n, f"Pareto VERBO TÉCNICO (Top {top_n})")
+    with c5:
+        pareto_chart(fd_view, "CAUSA_FALLA", "DOWNTIME_HR", top_n, f"Pareto CAUSA DE FALLA (Top {top_n})")
 
     st.divider()
 
-# =============================
-# Heatmap (Equipos vs Nivel técnico)
-# =============================
-st.subheader("Mapa de calor (Riesgo global) — Down Time (h)")
+    # =========================
+    # HEATMAP
+    # =========================
+    st.subheader("Mapa de calor (Riesgo global) — Down Time (h)")
 
-# 1) Detectar columna de Equipo (string)
-equipo_col = None
-if "__EQUIPO_COL__" in fd_view.columns:
-    try:
-        equipo_col = str(fd_view["__EQUIPO_COL__"].dropna().iloc[0]).strip()
-    except Exception:
-        equipo_col = None
+    if equipo_col is None:
+        st.info("No encontré columna de **Equipo** para el heatmap (EQUIPO / ID_EQUIPO / ID_EQUIPO_AFECTADO).")
+        st.stop()
 
-# Fallback: buscar en columnas típicas
-if not equipo_col or equipo_col not in fd_view.columns:
-    equipo_col = find_first_col(fd_view, ["EQUIPO", "ID_EQUIPO", "ID_EQUIPO_AFECTADO"])
+    # Selector Y (por defecto: sistemas = SUBUNIDAD)
+    y_options = [c for c in ["SUBUNIDAD", "COMPONENTE"] if c in fd_view.columns]
+    if not y_options:
+        st.info("No encontré columnas para el eje Y del heatmap (SUBUNIDAD/COMPONENTE).")
+        st.stop()
 
-y_col = hm_y_level
+    hm_y_level = st.selectbox("Eje Y (nivel)", y_options, index=0, key="hm_y_level")
 
-if equipo_col is None:
-    st.info("No encontré columna de **Equipo** para el heatmap (EQUIPO / ID_EQUIPO / ID_EQUIPO_AFECTADO).")
-    st.stop()
+    # TopNs para que el heatmap sea legible
+    hm_top_equipos = st.slider("Top equipos (X)", min_value=10, max_value=120, value=40, step=5, key="hm_top_equipos")
+    hm_top_y = st.slider("Top sistemas (Y)", min_value=5, max_value=60, value=20, step=5, key="hm_top_y")
 
-if y_col not in fd_view.columns:
-    st.info(f"No encontré la columna **{y_col}** para el heatmap.")
-    st.stop()
+    tmp = fd_view.copy()
+    tmp[equipo_col] = tmp[equipo_col].astype(str).str.upper().str.strip()
+    tmp[hm_y_level] = tmp[hm_y_level].astype(str).str.upper().str.strip()
 
-hm = fd_view.copy()
-hm[equipo_col] = hm[equipo_col].astype(str).str.strip()
-hm[y_col] = hm[y_col].astype(str).str.strip()
-hm["DOWNTIME_HR"] = pd.to_numeric(hm["DOWNTIME_HR"], errors="coerce").fillna(0.0)
-
-hm = hm[(hm[equipo_col] != "") & (hm[y_col] != "")]
-if hm.empty:
-    st.info("No hay datos suficientes para el heatmap con los filtros actuales.")
-    st.stop()
-
-# Reducir dimensión
-top_e = (
-    hm.groupby(equipo_col, dropna=True)["DOWNTIME_HR"].sum()
-    .sort_values(ascending=False)
-    .head(int(hm_top_equipos))
-    .index.tolist()
-)
-top_y = (
-    hm.groupby(y_col, dropna=True)["DOWNTIME_HR"].sum()
-    .sort_values(ascending=False)
-    .head(int(hm_top_y))
-    .index.tolist()
-)
-hm = hm[hm[equipo_col].isin(top_e) & hm[y_col].isin(top_y)].copy()
-
-mat = hm.pivot_table(
-    index=y_col,
-    columns=equipo_col,
-    values="DOWNTIME_HR",
-    aggfunc="sum",
-    fill_value=0.0
-)
-
-# Orden por impacto
-mat = mat.loc[mat.sum(axis=1).sort_values(ascending=False).index]
-mat = mat[mat.sum(axis=0).sort_values(ascending=False).index]
-
-fig = go.Figure(
-    data=go.Heatmap(
-        z=mat.values,
-        x=mat.columns.tolist(),
-        y=mat.index.tolist(),
-        colorbar=dict(title="Downtime (h)"),
-        hovertemplate=f"{y_col}: %{{y}}<br>Equipo: %{{x}}<br>Downtime: %{{z:.2f}} h<extra></extra>",
+    # Seleccionar top equipos y top Y por downtime total
+    top_eq = (
+        tmp.groupby(equipo_col)["DOWNTIME_HR"].sum()
+        .sort_values(ascending=False)
+        .head(int(hm_top_equipos))
+        .index.tolist()
     )
-)
-
-if hm_show_values:
-    fig.update_traces(
-        text=np.round(mat.values, 1),
-        texttemplate="%{text}",
-        textfont=dict(size=10),
+    top_y = (
+        tmp.groupby(hm_y_level)["DOWNTIME_HR"].sum()
+        .sort_values(ascending=False)
+        .head(int(hm_top_y))
+        .index.tolist()
     )
 
-fig.update_layout(
-    title=f"Heatmap — Downtime (h) por Equipo vs {y_col}",
-    title_x=0.5,
-    height=650,
-    margin=dict(l=30, r=20, t=60, b=120),
-    xaxis=dict(title="Equipos", tickangle=-45),
-    yaxis=dict(title=y_col),
-)
+    tmp = tmp[tmp[equipo_col].isin(top_eq) & tmp[hm_y_level].isin(top_y)].copy()
 
-st.plotly_chart(fig, use_container_width=True)
+    if tmp.empty:
+        st.info("No hay datos para el heatmap con los Top seleccionados.")
+    else:
+        pivot = (
+            tmp.pivot_table(
+                index=hm_y_level,
+                columns=equipo_col,
+                values="DOWNTIME_HR",
+                aggfunc="sum",
+                fill_value=0.0
+            )
+        )
 
+        # Ordenar ejes por totales
+        pivot = pivot.loc[pivot.sum(axis=1).sort_values(ascending=False).index]
+        pivot = pivot[pivot.sum(axis=0).sort_values(ascending=False).index]
+
+        fig_hm = px.imshow(
+            pivot,
+            aspect="auto",
+            labels=dict(x="Equipos", y=hm_y_level, color="Down Time (h)"),
+        )
+        fig_hm.update_layout(
+            title=f"Heatmap Down Time (h) — X: Equipos | Y: {hm_y_level}",
+            title_x=0.5,
+            margin=dict(l=20, r=20, t=70, b=40),
+        )
+        st.plotly_chart(fig_hm, width="stretch")
