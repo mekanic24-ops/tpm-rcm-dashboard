@@ -324,7 +324,7 @@ def pareto_chart(df: pd.DataFrame, dim_col: str, val_col: str, top_n: int, title
         yaxis2=dict(title="% Acum", overlaying="y", side="right", tickformat=".0%"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
 # =========================================================
 # LOAD
@@ -586,31 +586,31 @@ if page == "Dashboard":
         with r1c1:
             fig1 = px.bar(evo, x="MES", y="MTTR_HR", title="MTTR (h/falla) por mes")
             fig1.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            st.plotly_chart(fig1, width="stretch")
+            st.plotly_chart(fig1, use_container_width=True)
         with r1c2:
             fig2 = px.bar(evo, x="MES", y="MTBF_HR", title="MTBF (h/falla) por mes")
             fig2.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            st.plotly_chart(fig2, width="stretch")
+            st.plotly_chart(fig2, use_container_width=True)
 
         r2c1, r2c2 = st.columns(2)
         with r2c1:
             fig3 = px.bar(evo, x="MES", y="DISP", title="Disponibilidad (TO/(TO+DT)) por mes")
             fig3.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20), yaxis_tickformat=".0%")
-            st.plotly_chart(fig3, width="stretch")
+            st.plotly_chart(fig3, use_container_width=True)
         with r2c2:
             fig4 = px.bar(evo, x="MES", y="FALLAS", title="Cantidad de fallas por mes")
             fig4.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            st.plotly_chart(fig4, width="stretch")
+            st.plotly_chart(fig4, use_container_width=True)
 
         r3c1, r3c2 = st.columns(2)
         with r3c1:
             fig5 = px.bar(evo, x="MES", y="TO_HR", title="Tiempo de Operación (TO) por mes (h)")
             fig5.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            st.plotly_chart(fig5, width="stretch")
+            st.plotly_chart(fig5, use_container_width=True)
         with r3c2:
             fig6 = px.bar(evo, x="MES", y="DT_HR", title="Down Time por mes (h)")
             fig6.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            st.plotly_chart(fig6, width="stretch")
+            st.plotly_chart(fig6, use_container_width=True)
 
     st.subheader("Descargar datos filtrados")
     st.download_button(
@@ -769,7 +769,7 @@ elif page == "Paretos":
             title_x=0.5,
             margin=dict(l=20, r=20, t=70, b=40),
         )
-        st.plotly_chart(fig_hm_dt, width="stretch")
+        st.plotly_chart(fig_hm_dt, use_container_width=True)
 
     # -------------------------
     # HEATMAP 2: # Fallas (count)
@@ -818,7 +818,7 @@ elif page == "Paretos":
             title_x=0.5,
             margin=dict(l=20, r=20, t=70, b=40),
         )
-        st.plotly_chart(fig_hm_ct, width="stretch")
+        st.plotly_chart(fig_hm_ct, use_container_width=True)
 
 else:  # page == "Técnico"
     st.title("Dashboard Técnico (acción y mejora)")
@@ -903,56 +903,40 @@ else:  # page == "Técnico"
 
     # 2) KPIs técnicos
     st.subheader("2) KPIs técnicos (ya filtrados)")
-
-# =========================
-# TO REAL (misma base que Dashboard)
-# =========================
-h_to = horo_sel.copy()
-
-# Asegurar strings
-h_to["ID_EQUIPO"] = h_to["ID_EQUIPO"].astype(str)
-h_to["TIPO_EQUIPO"] = h_to["TIPO_EQUIPO"].astype(str).str.upper().str.strip()
-
-# (Opcional pero recomendado) evitar doble conteo si hay duplicados por turno/equipo
-h_to = (
-    h_to.groupby(["ID_TURNO", "ID_EQUIPO", "TIPO_EQUIPO"], dropna=False, as_index=False)["TO_HORO"]
-    .max()
-)
-
-if eq_sel != "(Todos)":
-    # TO real del equipo específico
-    to_real = float(h_to.loc[h_to["ID_EQUIPO"] == str(eq_sel), "TO_HORO"].sum())
-else:
-    # TO real coherente con la vista global
-    if vista_disp == "Tractor":
-        to_real = float(h_to.loc[h_to["TIPO_EQUIPO"] == "TRACTOR", "TO_HORO"].sum())
+    # KPI base: usar los mismos filtros globales (sidebar) y además los filtros jerárquicos (cascada).
+    # Si no se elige un equipo específico, el TO debe coincidir con la base del Dashboard (to_base).
+    
+    # TO real según selección de equipo
+    if eq_sel != "(Todos)":
+        to_real = float(horo_sel.loc[horo_sel["ID_EQUIPO"].astype(str) == str(eq_sel), "TO_HORO"].sum())
     else:
-        # Implemento o Sistema(TRC+IMP) => base implemento
-        to_real = float(h_to.loc[h_to["TIPO_EQUIPO"] == "IMPLEMENTO", "TO_HORO"].sum())
-
+        to_real = float(to_base) if pd.notna(to_base) else 0.0
+    
+    # KPIs desde FALLAS_DETALLE (ya filtrado por sidebar + cascada)
     n_fallas = int(len(df_lvl))
     dt_hr = float(df_lvl["DOWNTIME_HR"].sum()) if not df_lvl.empty else 0.0
     mttr = (dt_hr / n_fallas) if n_fallas > 0 else np.nan
     mtbf = (to_real / n_fallas) if n_fallas > 0 else np.nan
     disp_tec = (to_real / (to_real + dt_hr)) if (to_real + dt_hr) > 0 else np.nan
-
-    # Disponibilidad al final (misma fila)
+    
     cards = [
-        kpi_card_html("Horas operadas reales (TO)", fmt_num(to_real), hint="Base para MTBF técnico"),
-        kpi_card_html("Down Time (h)", fmt_num(dt_hr), hint="Suma de DOWNTIME_HR"),
-        kpi_card_html("N° de fallas", f"{n_fallas:,}", hint="Conteo en FALLAS_DETALLE"),
-        kpi_card_html("MTTR (h/falla)", fmt_num(mttr), hint="DT / #fallas"),
-        kpi_card_html("MTBF (h/falla)", fmt_num(mtbf), hint="TO real / #fallas"),
-        kpi_card_html("Disponibilidad", fmt_pct(disp_tec), hint="TO / (TO + DT)"),
+        kpi_card_html("Horas operadas reales (TO)", fmt_num(to_real), hint="Misma base que Dashboard; si eliges un equipo, usa su TO real"),
+        kpi_card_html("Down Time (h)", fmt_num(dt_hr), hint="Suma de DOWNTIME_HR (FALLAS_DETALLE)"),
+        kpi_card_html("N° de fallas", f"{n_fallas:,}", hint="Conteo (FALLAS_DETALLE)"),
+        kpi_card_html("MTTR (h/falla)", fmt_num(mttr), hint="DT / #fallas", color=mttr_color_3(mttr)),
+        kpi_card_html("MTBF (h/falla)", fmt_num(mtbf), hint="TO / #fallas", color=mtbf_color(mtbf)),
+        kpi_card_html("Disponibilidad", fmt_pct(disp_tec), hint="TO / (TO + DT)", color=disp_color(disp_tec)),
     ]
-    render_kpi_row(cards, height=205)
-
+    render_kpi_row(cards, height=205, big=False)
+    
     st.divider()
-
-    # 3) 3 gráficos en 1 fila
+    
+    # =====================================================
+    # 3) Análisis por nivel (barras) — SOLO 3 gráficos en 1 fila
+    # =====================================================
     st.subheader("3) Análisis de fallas por nivel (barras)")
-
-    def bar_fallas(df_in, col, title, top=15):
+    
+    def bar_fallas(df_in: pd.DataFrame, col: Optional[str], title: str, top: int = 15):
         if col is None or col not in df_in.columns:
             return None
         g = df_in.groupby(col, dropna=True).size().reset_index(name="FALLAS")
@@ -963,7 +947,8 @@ else:
         fig = px.bar(g, x="FALLAS", y=col, orientation="h", title=title)
         fig.update_layout(title_x=0.5, margin=dict(l=10, r=10, t=50, b=10), yaxis_title="")
         return fig
-
+    
+    # Contexto: respeta filtros jerárquicos seleccionados (sobre fd, que ya está filtrado por sidebar)
     df_context = fd.copy()
     if eq_sel != "(Todos)":
         df_context = df_context[df_context[equipo_col].astype(str) == str(eq_sel)].copy()
@@ -975,36 +960,34 @@ else:
         df_context = df_context[df_context[comp_col].astype(str) == str(com_sel)].copy()
     if par_sel not in ["(Todos)", "(No disponible)"] and parte_col and parte_col in df_context.columns:
         df_context = df_context[df_context[parte_col].astype(str) == str(par_sel)].copy()
-
+    
     top_barras = st.slider("Top por gráfico", min_value=5, max_value=30, value=15, step=1, key="tec_top_barras")
-
     cA, cB, cC = st.columns(3)
     with cA:
         figA = bar_fallas(df_context, sistema_col, "Fallas por Sistema (SUB UNIDAD)", top=top_barras)
-        if figA is None:
-            st.info("Sin datos para Sistema con los filtros actuales.")
+        if figA is not None:
+            st.plotly_chart(figA, use_container_width=True)
         else:
-            st.plotly_chart(figA, width="stretch")
-
+            st.info("Sin datos para Sistema con los filtros actuales.")
     with cB:
         figB = bar_fallas(df_context, comp_col, "Fallas por Componente", top=top_barras)
-        if figB is None:
-            st.info("Sin datos para Componente con los filtros actuales.")
+        if figB is not None:
+            st.plotly_chart(figB, use_container_width=True)
         else:
-            st.plotly_chart(figB, width="stretch")
-
+            st.info("Sin datos para Componente con los filtros actuales.")
     with cC:
         figC = bar_fallas(df_context, parte_col, "Fallas por Parte", top=top_barras)
-        if figC is None:
-            st.info("Sin datos para Parte con los filtros actuales.")
+        if figC is not None:
+            st.plotly_chart(figC, use_container_width=True)
         else:
-            st.plotly_chart(figC, width="stretch")
-
+            st.info("Sin datos para Parte con los filtros actuales.")
+    
     st.divider()
-
-    # 4) Top técnicos
+    
+    # =====================================================
+    # 4) Top técnicos (dónde atacar primero)
+    # =====================================================
     st.subheader("4) Top técnicos (dónde atacar primero)")
-
     top_level = comp_col if (comp_col and comp_col in df_context.columns) else parte_col
     if top_level is None or top_level not in df_context.columns:
         st.info("No hay COMPONENTE/PARTE para construir Top técnicos.")
@@ -1016,17 +999,23 @@ else:
         g["ITEM"] = g["ITEM"].astype(str)
         g["MTTR_HR"] = np.where(g["FALLAS"] > 0, g["DT_HR"] / g["FALLAS"], np.nan)
         g["MTBF_HR"] = np.where(g["FALLAS"] > 0, to_real / g["FALLAS"], np.nan)
-
+    
         c1, c2, c3 = st.columns(3)
         with c1:
             st.markdown(center_title(f"Top 10 {top_level} con MTTR alto"), unsafe_allow_html=True)
             d = g.dropna(subset=["MTTR_HR"]).sort_values("MTTR_HR", ascending=False).head(10)
-            st.plotly_chart(px.bar(d, x="MTTR_HR", y="ITEM", orientation="h"), width="stretch")
+            fig = px.bar(d, x="MTTR_HR", y="ITEM", orientation="h")
+            fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), xaxis_title="MTTR (h/falla)", yaxis_title="")
+            st.plotly_chart(fig, use_container_width=True)
         with c2:
             st.markdown(center_title(f"Top 10 {top_level} con MTBF bajo"), unsafe_allow_html=True)
             d = g.dropna(subset=["MTBF_HR"]).sort_values("MTBF_HR", ascending=True).head(10)
-            st.plotly_chart(px.bar(d, x="MTBF_HR", y="ITEM", orientation="h"), width="stretch")
+            fig = px.bar(d, x="MTBF_HR", y="ITEM", orientation="h")
+            fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), xaxis_title="MTBF (h/falla)", yaxis_title="")
+            st.plotly_chart(fig, use_container_width=True)
         with c3:
             st.markdown(center_title(f"Top 10 {top_level} con Down Time alto"), unsafe_allow_html=True)
             d = g.sort_values("DT_HR", ascending=False).head(10)
-            st.plotly_chart(px.bar(d, x="DT_HR", y="ITEM", orientation="h"), width="stretch")
+            fig = px.bar(d, x="DT_HR", y="ITEM", orientation="h")
+            fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Down Time (h)", yaxis_title="")
+            st.plotly_chart(fig, use_container_width=True)
