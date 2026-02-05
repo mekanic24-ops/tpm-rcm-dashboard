@@ -515,9 +515,9 @@ render_kpi_row(row2, big=True)
 st.divider()
 
 # =========================================================
-# EVOLUCIÓN POR MES-AÑO (MTTR/MTBF/DISP/FALLAS)
+# EVOLUCIÓN POR MES-AÑO (MTTR/MTBF/DISP/FALLAS/TO/DT)
 # =========================================================
-st.subheader("Evolución por mes-año (MTTR, MTBF, Disponibilidad y Fallas)")
+st.subheader("Evolución por mes-año (MTTR, MTBF, Disponibilidad, Fallas, TO y Down Time)")
 
 base = turnos.copy()
 if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
@@ -551,21 +551,30 @@ else:
     turn_mes = base[["ID_TURNO", "MES", "ID_TRACTOR", "ID_IMPLEMENTO"]].copy()
     turn_mes["ID_TURNO"] = turn_mes["ID_TURNO"].astype(str)
 
+    # TO por mes según vista
     h2 = h.merge(turn_mes[["ID_TURNO", "MES"]], on="ID_TURNO", how="left")
     if vista_disp == "Tractor":
         h2 = h2[h2["TIPO_EQUIPO"].astype(str).str.upper() == "TRACTOR"].copy()
+    elif vista_disp == "Implemento":
+        h2 = h2[h2["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
     else:
+        # Sistema (TRC+IMP): por tu lógica original, TO base = TO del implemento
         h2 = h2[h2["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
 
     to_mes = h2.groupby("MES", dropna=True)["TO_HORO"].sum().reset_index(name="TO_HR")
 
+    # DT/Fallas por mes según vista
     e2 = e.merge(turn_mes, on="ID_TURNO", how="left")
+
     if vista_disp == "Tractor":
         trcs = base["ID_TRACTOR"].dropna().astype(str).unique().tolist()
         e2 = e2[e2["ID_EQUIPO_AFECTADO"].astype(str).isin(trcs)]
     elif vista_disp == "Implemento":
         imps = base["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist()
         e2 = e2[e2["ID_EQUIPO_AFECTADO"].astype(str).isin(imps)]
+    else:
+        # Sistema (TRC+IMP): deja ambos (tractor + implemento)
+        pass
 
     dt_mes = e2.groupby("MES", dropna=True).agg(
         DT_HR=("DT_HR", "sum"),
@@ -578,6 +587,7 @@ else:
     evo["DISP"] = np.where((evo["TO_HR"] + evo["DT_HR"]) > 0, evo["TO_HR"] / (evo["TO_HR"] + evo["DT_HR"]), np.nan)
     evo = evo.sort_values("MES", ascending=True)
 
+    # ======= FILA 1 (MTTR / MTBF)
     r1c1, r1c2 = st.columns(2)
     with r1c1:
         fig1 = px.bar(evo, x="MES", y="MTTR_HR", title="MTTR (h/falla) por mes")
@@ -588,6 +598,7 @@ else:
         fig2.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
         st.plotly_chart(fig2, use_container_width=True)
 
+    # ======= FILA 2 (DISP / FALLAS)
     r2c1, r2c2 = st.columns(2)
     with r2c1:
         fig3 = px.bar(evo, x="MES", y="DISP", title="Disponibilidad (TO/(TO+DT)) por mes")
@@ -598,7 +609,16 @@ else:
         fig4.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
         st.plotly_chart(fig4, use_container_width=True)
 
-st.divider()
+    # ======= FILA 3 (TO / DOWN TIME)
+    r3c1, r3c2 = st.columns(2)
+    with r3c1:
+        fig5 = px.bar(evo, x="MES", y="TO_HR", title="Tiempo de Operación (TO) por mes (h)")
+        fig5.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
+        st.plotly_chart(fig5, use_container_width=True)
+    with r3c2:
+        fig6 = px.bar(evo, x="MES", y="DT_HR", title="Down Time por mes (h)")
+        fig6.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
+        st.plotly_chart(fig6, use_container_width=True)
 
 # =========================================================
 # TOP 10 TÉCNICO (SUBUNIDAD / COMPONENTE / PARTE / VERBO / CAUSA)
