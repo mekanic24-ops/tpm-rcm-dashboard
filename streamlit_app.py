@@ -31,6 +31,7 @@ def ensure_data_unzipped():
     with zipfile.ZipFile(zip_path, "r") as z:
         z.extractall(DATA_DIR)
 
+
 def norm_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = (
@@ -43,23 +44,38 @@ def norm_cols(df: pd.DataFrame) -> pd.DataFrame:
     )
     return df
 
+
 def find_first_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     for c in candidates:
         if c in df.columns:
             return c
     return None
 
+
 def safe_norm_str_series(s: pd.Series) -> pd.Series:
     return s.astype(str).str.replace(".0", "", regex=False).str.strip()
+
 
 def infer_tipo_equipo_from_code(x: str) -> Optional[str]:
     if x is None or (isinstance(x, float) and np.isnan(x)):
         return None
     s = str(x).strip().upper()
-    # Regla simple: TRC = tractor. Si tienes otros prefijos de tractor, los agregas aquí.
+    # Regla simple: TRC = tractor. Si tienes otros prefijos, agrégalos aquí.
     if s.startswith("TRC"):
         return "TRACTOR"
     return "IMPLEMENTO"
+
+
+def _coerce_downtime_to_hr(x: pd.Series) -> pd.Series:
+    """Convierte una serie a horas; si parece estar en minutos, divide entre 60."""
+    v = pd.to_numeric(x, errors="coerce")
+    if v.notna().any():
+        p95 = np.nanpercentile(v.dropna(), 95)
+        # Si el p95 es muy grande, casi seguro está en minutos
+        if pd.notna(p95) and p95 > 240:  # >240h es raro; en minutos sería >14400
+            v = v / 60.0
+    return v
+
 
 @st.cache_data(show_spinner=False)
 def load_tables() -> dict:
@@ -119,28 +135,35 @@ def load_tables() -> dict:
     lotes["ID_LOTE"] = norm_str(lotes["ID_LOTE"])
     lotes["CULTIVO"] = lotes["CULTIVO"].astype(str)
 
-    # FALLAS_DETALLE_NORMALIZADO: normaliza si existe
+    # ==============================
+    # FALLAS_DETALLE_NORMALIZADO
+    # ==============================
     if fallas_detalle is not None:
         fallas_detalle = norm_cols(fallas_detalle)
 
+        # 1) ID -> ID_TURNO (clave para que filtre por rango de fechas)
+        if "ID" in fallas_detalle.columns and "ID_TURNO" not in fallas_detalle.columns:
+            fallas_detalle["ID_TURNO"] = norm_str(fallas_detalle["ID"])
+
+        # 2) Normalizar cadenas claves
         for c in ["ID_TURNO", "EQUIPO", "ID_EQUIPO", "ID_EQUIPO_AFECTADO", "TIPO_EQUIPO"]:
             if c in fallas_detalle.columns:
                 fallas_detalle[c] = norm_str(fallas_detalle[c])
 
-        # asegurar DOWNTIME_HR
+        # 3) Downtime: T_FALLA / etc -> DOWNTIME_HR (con heurística min->hr)
         if "DOWNTIME_HR" in fallas_detalle.columns:
-            fallas_detalle["DOWNTIME_HR"] = pd.to_numeric(fallas_detalle["DOWNTIME_HR"], errors="coerce")
+            fallas_detalle["DOWNTIME_HR"] = _coerce_downtime_to_hr(fallas_detalle["DOWNTIME_HR"])
         else:
             tf = find_first_col(
                 fallas_detalle,
                 ["T_FALLA", "TFALLA", "TIEMPO_FALLA", "TIEMPO_DE_FALLA", "DOWNTIME", "DT_HR"]
             )
             if tf is not None:
-                fallas_detalle["DOWNTIME_HR"] = pd.to_numeric(fallas_detalle[tf], errors="coerce")
+                fallas_detalle["DOWNTIME_HR"] = _coerce_downtime_to_hr(fallas_detalle[tf])
             else:
                 fallas_detalle["DOWNTIME_HR"] = np.nan
 
-        # aliases comunes (incluye VERBO y CAUSA)
+        # 4) Aliases (los tuyos vienen como SUB_UNIDAD / PIEZA / CAUSA / VERBO_TECNICO)
         alias_map = {
             "SUB_UNIDAD": "SUBUNIDAD",
             "SUBSISTEMA": "SUBUNIDAD",
@@ -156,6 +179,12 @@ def load_tables() -> dict:
             if src in fallas_detalle.columns and dst not in fallas_detalle.columns:
                 fallas_detalle[dst] = fallas_detalle[src]
 
+        # 5) Si no hay TIPO_EQUIPO, lo inferimos por EQUIPO
+        eq_col = find_first_col(fallas_detalle, ["EQUIPO", "ID_EQUIPO", "ID_EQUIPO_AFECTADO"])
+        if "TIPO_EQUIPO" not in fallas_detalle.columns or fallas_detalle["TIPO_EQUIPO"].isna().all():
+            if eq_col is not None:
+                fallas_detalle["TIPO_EQUIPO"] = fallas_detalle[eq_col].apply(infer_tipo_equipo_from_code)
+
     return {
         "turnos": turnos,
         "horometros": horometros,
@@ -166,6 +195,7 @@ def load_tables() -> dict:
         "cat_proceso": cat_proceso,
         "fallas_detalle": fallas_detalle,
     }
+
 
 def normalize_cultivo(x) -> Optional[str]:
     if x is None or (isinstance(x, float) and np.isnan(x)):
@@ -178,6 +208,7 @@ def normalize_cultivo(x) -> Optional[str]:
         return "ARANDANO"
     return s
 
+
 def normalize_turno(x) -> Optional[str]:
     if x is None or (isinstance(x, float) and np.isnan(x)):
         return None
@@ -188,6 +219,7 @@ def normalize_turno(x) -> Optional[str]:
     if s in ["N", "NOCHE", "NIGHT"]:
         return "NOCHE"
     return s
+
 
 def build_enriched_turnos(turnos, operadores, lotes):
     t = turnos.copy()
@@ -205,6 +237,7 @@ def build_enriched_turnos(turnos, operadores, lotes):
 
     return t
 
+
 def mttr_color_3(v):
     if v is None or pd.isna(v):
         return None
@@ -214,6 +247,7 @@ def mttr_color_3(v):
         return "#2ca02c"
     return "#d62728"
 
+
 def mtbf_color(v):
     if v is None or pd.isna(v):
         return None
@@ -222,6 +256,7 @@ def mtbf_color(v):
     if 100 <= v <= 500:
         return "#2ca02c"
     return "#1f77b4"
+
 
 def disp_color(d):
     if d is None or pd.isna(d):
@@ -233,15 +268,18 @@ def disp_color(d):
         return "#2ca02c"
     return "#1f77b4"
 
+
 def fmt_num(x, dec=2):
     if x is None or pd.isna(x):
         return "—"
     return f"{x:,.{dec}f}"
 
+
 def fmt_pct(x, dec=2):
     if x is None or pd.isna(x):
         return "—"
     return f"{x*100:,.{dec}f}%"
+
 
 def kpi_card_html(title: str, value: str, color: Optional[str] = None, hint: Optional[str] = None) -> str:
     val_style = "color:#111;"
@@ -255,6 +293,7 @@ def kpi_card_html(title: str, value: str, color: Optional[str] = None, hint: Opt
         <div class="kpi-hint">{hint_text}</div>
       </div>
     """
+
 
 def render_kpi_row(cards_html: List[str], big: bool = False):
     row_class = "kpi-row big" if big else "kpi-row"
@@ -284,8 +323,10 @@ def render_kpi_row(cards_html: List[str], big: bool = False):
     """
     components.html(html, height=185 if big else 175)
 
+
 def center_title(txt: str) -> str:
     return f"<div style='text-align:center;font-weight:800;font-size:18px;margin:0 0 4px 0;'>{txt}</div>"
+
 
 # =========================================================
 # LOAD
@@ -442,7 +483,6 @@ else:
 mttr_hr = (dt_base / n_base) if n_base > 0 else np.nan
 mtbf_hr = (to_base / n_base) if n_base > 0 else np.nan
 
-# DISP = TO / (TO + DT)
 disp = (to_base / (to_base + dt_base)) if (to_base is not None and (to_base + dt_base) > 0) else np.nan
 
 # =========================================================
@@ -511,7 +551,6 @@ else:
     turn_mes = base[["ID_TURNO", "MES", "ID_TRACTOR", "ID_IMPLEMENTO"]].copy()
     turn_mes["ID_TURNO"] = turn_mes["ID_TURNO"].astype(str)
 
-    # TO por mes según vista
     h2 = h.merge(turn_mes[["ID_TURNO", "MES"]], on="ID_TURNO", how="left")
     if vista_disp == "Tractor":
         h2 = h2[h2["TIPO_EQUIPO"].astype(str).str.upper() == "TRACTOR"].copy()
@@ -520,9 +559,7 @@ else:
 
     to_mes = h2.groupby("MES", dropna=True)["TO_HORO"].sum().reset_index(name="TO_HR")
 
-    # DT/Fallas por mes según vista
     e2 = e.merge(turn_mes, on="ID_TURNO", how="left")
-
     if vista_disp == "Tractor":
         trcs = base["ID_TRACTOR"].dropna().astype(str).unique().tolist()
         e2 = e2[e2["ID_EQUIPO_AFECTADO"].astype(str).isin(trcs)]
@@ -565,6 +602,7 @@ st.divider()
 
 # =========================================================
 # TOP 10 TÉCNICO (SUBUNIDAD / COMPONENTE / PARTE / VERBO / CAUSA)
+# (YA ES SENSIBLE A RANGO DE FECHAS porque fd_sel viene filtrado por ids_turno)
 # =========================================================
 st.subheader("Top 10 Técnico (Subunidad / Componente / Parte / Verbo / Causa) por Tiempo de Falla (h)")
 
@@ -573,18 +611,29 @@ if fd_sel is None:
 else:
     fd_sel = norm_cols(fd_sel)
 
-    # Asegurar DOWNTIME_HR
+    # ---- Asegurar ID_TURNO (por si el CSV trae 'ID' y no 'ID_TURNO') ----
+    if "ID_TURNO" not in fd_sel.columns and "ID" in fd_sel.columns:
+        fd_sel["ID_TURNO"] = safe_norm_str_series(fd_sel["ID"])
+
+    # ---- Asegurar DOWNTIME_HR ----
     if "DOWNTIME_HR" not in fd_sel.columns:
         tf = find_first_col(fd_sel, ["T_FALLA", "TFALLA", "TIEMPO_FALLA", "TIEMPO_DE_FALLA", "DOWNTIME", "DT_HR"])
         if tf is not None:
-            fd_sel["DOWNTIME_HR"] = pd.to_numeric(fd_sel[tf], errors="coerce")
+            fd_sel["DOWNTIME_HR"] = _coerce_downtime_to_hr(fd_sel[tf])
         else:
             fd_sel["DOWNTIME_HR"] = np.nan
+
+    # ---- Aliases por si vienen con otros nombres ----
+    if "SUBUNIDAD" not in fd_sel.columns and "SUB_UNIDAD" in fd_sel.columns:
+        fd_sel["SUBUNIDAD"] = fd_sel["SUB_UNIDAD"]
+    if "PARTE" not in fd_sel.columns and "PIEZA" in fd_sel.columns:
+        fd_sel["PARTE"] = fd_sel["PIEZA"]
+    if "CAUSA_FALLA" not in fd_sel.columns and "CAUSA" in fd_sel.columns:
+        fd_sel["CAUSA_FALLA"] = fd_sel["CAUSA"]
 
     # Detectar columna de equipo
     equipo_col = find_first_col(fd_sel, ["EQUIPO", "ID_EQUIPO", "ID_EQUIPO_AFECTADO"])
     if equipo_col is None:
-        # Si no existe, igual mostramos top10 pero advertimos
         st.warning("FALLAS_DETALLE_NORMALIZADO no tiene columna EQUIPO/ID_EQUIPO. Se mostrará sin filtro por equipo.")
         fd_sel["__EQUIPO__"] = None
         equipo_col = "__EQUIPO__"
@@ -594,15 +643,14 @@ else:
         fd_sel["TIPO_EQUIPO"] = fd_sel[equipo_col].apply(infer_tipo_equipo_from_code)
     else:
         fd_sel["TIPO_EQUIPO"] = fd_sel["TIPO_EQUIPO"].astype(str).str.upper().str.strip()
-        # fallback si hay vacíos
-        mask_na = fd_sel["TIPO_EQUIPO"].isin(["", "NAN", "NONE"])
-        if mask_na.any():
-            fd_sel.loc[mask_na, "TIPO_EQUIPO"] = fd_sel.loc[mask_na, equipo_col].apply(infer_tipo_equipo_from_code)
+        mask_bad = fd_sel["TIPO_EQUIPO"].isin(["", "NAN", "NONE"])
+        if mask_bad.any():
+            fd_sel.loc[mask_bad, "TIPO_EQUIPO"] = fd_sel.loc[mask_bad, equipo_col].apply(infer_tipo_equipo_from_code)
 
     # ---- FILTRO FINO por selección TRC/IMP + vista ----
     fd_view = fd_sel.copy()
 
-    # 1) Si el usuario seleccionó tractor/implemento específico, filtrar por esos códigos (en vista Sistema, aplica a ambos)
+    # 1) Si el usuario seleccionó tractor/implemento específico, filtrar por esos códigos
     allowed_equipos = []
     if trc_sel != "(Todos)":
         allowed_equipos.append(str(trc_sel).upper())
@@ -612,14 +660,11 @@ else:
     if allowed_equipos and equipo_col != "__EQUIPO__":
         fd_view = fd_view[fd_view[equipo_col].astype(str).str.upper().isin(allowed_equipos)].copy()
 
-    # 2) Luego aplicar vista (Tractor / Implemento / Sistema)
+    # 2) Luego aplicar vista
     if vista_disp == "Tractor":
         fd_view = fd_view[fd_view["TIPO_EQUIPO"] == "TRACTOR"].copy()
     elif vista_disp == "Implemento":
         fd_view = fd_view[fd_view["TIPO_EQUIPO"] == "IMPLEMENTO"].copy()
-    else:
-        # Sistema: deja ambos (pero si eligió TRC/IMP específico, ya quedó filtrado arriba)
-        pass
 
     # Limpiar downtime
     fd_view["DOWNTIME_HR"] = pd.to_numeric(fd_view["DOWNTIME_HR"], errors="coerce").fillna(0.0)
@@ -656,7 +701,7 @@ else:
         with c3:
             top10_bar(fd_view, "PARTE", "Top 10 PARTE")
 
-        # 2 gráficos abajo (VERBO y CAUSA)
+        # 2 gráficos abajo
         c4, c5 = st.columns(2)
         with c4:
             top10_bar(fd_view, "VERBO_TECNICO", "Top 10 VERBO TÉCNICO")
