@@ -904,10 +904,31 @@ else:  # page == "Técnico"
     # 2) KPIs técnicos
     st.subheader("2) KPIs técnicos (ya filtrados)")
 
-    if eq_sel != "(Todos)":
-        to_real = float(horo_sel.loc[horo_sel["ID_EQUIPO"].astype(str) == str(eq_sel), "TO_HORO"].sum())
+# =========================
+# TO REAL (misma base que Dashboard)
+# =========================
+h_to = horo_sel.copy()
+
+# Asegurar strings
+h_to["ID_EQUIPO"] = h_to["ID_EQUIPO"].astype(str)
+h_to["TIPO_EQUIPO"] = h_to["TIPO_EQUIPO"].astype(str).str.upper().str.strip()
+
+# (Opcional pero recomendado) evitar doble conteo si hay duplicados por turno/equipo
+h_to = (
+    h_to.groupby(["ID_TURNO", "ID_EQUIPO", "TIPO_EQUIPO"], dropna=False, as_index=False)["TO_HORO"]
+    .max()
+)
+
+if eq_sel != "(Todos)":
+    # TO real del equipo específico
+    to_real = float(h_to.loc[h_to["ID_EQUIPO"] == str(eq_sel), "TO_HORO"].sum())
+else:
+    # TO real coherente con la vista global
+    if vista_disp == "Tractor":
+        to_real = float(h_to.loc[h_to["TIPO_EQUIPO"] == "TRACTOR", "TO_HORO"].sum())
     else:
-        to_real = float(horo_sel["TO_HORO"].sum()) if not horo_sel.empty else 0.0
+        # Implemento o Sistema(TRC+IMP) => base implemento
+        to_real = float(h_to.loc[h_to["TIPO_EQUIPO"] == "IMPLEMENTO", "TO_HORO"].sum())
 
     n_fallas = int(len(df_lvl))
     dt_hr = float(df_lvl["DOWNTIME_HR"].sum()) if not df_lvl.empty else 0.0
