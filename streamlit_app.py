@@ -229,6 +229,11 @@ def fmt_pct(x, dec=1):
         return "—"
     return f"{x*100:.{dec}f}%"
 
+def fmt_pct(x, dec=2):
+    if x is None or pd.isna(x):
+        return "—"
+    return f"{x*100:,.{dec}f}%"
+
 def kpi_card_html(title: str, value: str, hint: Optional[str] = None, color: Optional[str] = None) -> str:
     hint_text = hint if hint else "&nbsp;"
     border = f"border:2px solid {color};" if color else "border:1px solid #e5e7eb;"
@@ -514,6 +519,124 @@ if page == "Dashboard":
 
     st.divider()
 
+# =========================================================
+# EVOLUCIÓN POR MES-AÑO (MTTR/MTBF/DISP/FALLAS/TO/DT)
+# =========================================================
+st.subheader("Evolución por mes-año (MTTR, MTBF, Disponibilidad, Fallas, TO y Down Time)")
+
+base = turnos.copy()
+
+# Reaplicar filtros globales (igual que tu lógica)
+if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
+    d1 = pd.to_datetime(date_range[0])
+    d2 = pd.to_datetime(date_range[1])
+    base = base[(base["FECHA"] >= d1) & (base["FECHA"] <= d2)]
+
+if cult_sel:
+    base = base[base["CULTIVO"] == cult_sel]
+if turn_sel:
+    base = base[base["TURNO_NORM"] == turn_sel]
+if trc_sel != "(Todos)":
+    base = base[base["ID_TRACTOR"].astype(str) == str(trc_sel)]
+if imp_sel != "(Todos)":
+    base = base[base["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
+if id_proceso_sel is not None:
+    base = base[base["ID_PROCESO"].astype(str) == str(id_proceso_sel)]
+
+if base.empty:
+    st.info("Con los filtros actuales, no hay datos para construir la evolución mensual.")
+else:
+    base = base.copy()
+    base["MES"] = base["FECHA"].dt.to_period("M").astype(str)
+    ids = set(base["ID_TURNO"].astype(str).tolist())
+
+    h = horometros[horometros["ID_TURNO"].astype(str).isin(ids)].copy()
+    e = eventos[eventos["ID_TURNO"].astype(str).isin(ids)].copy()
+
+    # Fallas + DT
+    e = e[e["CATEGORIA_EVENTO"].astype(str).str.upper() == "FALLA"].copy()
+    e["DT_HR"] = pd.to_numeric(e["DT_MIN"], errors="coerce") / 60.0
+
+    turn_mes = base[["ID_TURNO", "MES", "ID_TRACTOR", "ID_IMPLEMENTO"]].copy()
+    turn_mes["ID_TURNO"] = turn_mes["ID_TURNO"].astype(str)
+
+    # -------------------------
+    # TO por mes según vista
+    # -------------------------
+    h2 = h.merge(turn_mes[["ID_TURNO", "MES"]], on="ID_TURNO", how="left")
+
+    if vista_disp == "Tractor":
+        h2 = h2[h2["TIPO_EQUIPO"].astype(str).str.upper() == "TRACTOR"].copy()
+    elif vista_disp == "Implemento":
+        h2 = h2[h2["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
+    else:
+        # Sistema (TRC+IMP) => usas TO del implemento como base (tal como venías haciendo)
+        h2 = h2[h2["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
+
+    to_mes = h2.groupby("MES", dropna=True)["TO_HORO"].sum().reset_index(name="TO_HR")
+
+    # -------------------------
+    # DT + FALLAS por mes según vista
+    # -------------------------
+    e2 = e.merge(turn_mes, on="ID_TURNO", how="left")
+
+    if vista_disp == "Tractor":
+        trcs = base["ID_TRACTOR"].dropna().astype(str).unique().tolist()
+        e2 = e2[e2["ID_EQUIPO_AFECTADO"].astype(str).isin(trcs)]
+    elif vista_disp == "Implemento":
+        imps = base["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist()
+        e2 = e2[e2["ID_EQUIPO_AFECTADO"].astype(str).isin(imps)]
+    else:
+        # Sistema (TRC+IMP): no filtras, consideras todas las fallas del conjunto filtrado
+        pass
+
+    dt_mes = e2.groupby("MES", dropna=True).agg(
+        DT_HR=("DT_HR", "sum"),
+        FALLAS=("DT_HR", "size")
+    ).reset_index()
+
+    evo = to_mes.merge(dt_mes, on="MES", how="left").fillna({"DT_HR": 0.0, "FALLAS": 0})
+    evo["FALLAS"] = evo["FALLAS"].astype(int)
+
+    evo["MTTR_HR"] = np.where(evo["FALLAS"] > 0, evo["DT_HR"] / evo["FALLAS"], np.nan)
+    evo["MTBF_HR"] = np.where(evo["FALLAS"] > 0, evo["TO_HR"] / evo["FALLAS"], np.nan)
+    evo["DISP"] = np.where((evo["TO_HR"] + evo["DT_HR"]) > 0, evo["TO_HR"] / (evo["TO_HR"] + evo["DT_HR"]), np.nan)
+    evo = evo.sort_values("MES", ascending=True)
+
+    # -------------------------
+    # 6 gráficos (2x3)
+    # -------------------------
+    r1c1, r1c2 = st.columns(2)
+    with r1c1:
+        fig1 = px.bar(evo, x="MES", y="MTTR_HR", title="MTTR (h/falla) por mes")
+        fig1.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
+        st.plotly_chart(fig1, use_container_width=True)
+    with r1c2:
+        fig2 = px.bar(evo, x="MES", y="MTBF_HR", title="MTBF (h/falla) por mes")
+        fig2.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
+        st.plotly_chart(fig2, use_container_width=True)
+
+    r2c1, r2c2 = st.columns(2)
+    with r2c1:
+        fig3 = px.bar(evo, x="MES", y="DISP", title="Disponibilidad (TO/(TO+DT)) por mes")
+        fig3.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20), yaxis_tickformat=".0%")
+        st.plotly_chart(fig3, use_container_width=True)
+    with r2c2:
+        fig4 = px.bar(evo, x="MES", y="FALLAS", title="Cantidad de fallas por mes")
+        fig4.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
+        st.plotly_chart(fig4, use_container_width=True)
+
+    r3c1, r3c2 = st.columns(2)
+    with r3c1:
+        fig5 = px.bar(evo, x="MES", y="TO_HR", title="Tiempo de Operación (TO) por mes (h)")
+        fig5.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
+        st.plotly_chart(fig5, use_container_width=True)
+    with r3c2:
+        fig6 = px.bar(evo, x="MES", y="DT_HR", title="Down Time por mes (h)")
+        fig6.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
+        st.plotly_chart(fig6, use_container_width=True)
+
+
     st.subheader("Descargar datos filtrados")
     st.download_button(
         "Descargar TURNOS filtrado (CSV)",
@@ -607,6 +730,84 @@ elif page == "Paretos":
         pareto_chart(fd_view, "CAUSA_FALLA", "DOWNTIME_HR", top_n, f"Pareto CAUSA DE FALLA (Top {top_n})")
 
     st.divider()
+
+# =========================
+# HEATMAP #1 (Cantidad de Fallas)
+# =========================
+st.subheader("Mapa de calor (Cantidad de fallas) — # Fallas")
+
+if equipo_col is None:
+    st.info("No encontré columna de **Equipo** para el heatmap (EQUIPO / ID_EQUIPO / ID_EQUIPO_AFECTADO).")
+    st.stop()
+
+# Selector Y (mismos niveles)
+y_options2 = [c for c in ["SUBUNIDAD", "COMPONENTE", "PARTE"] if c in fd_view.columns]
+if not y_options2:
+    st.info("No encontré columnas para el eje Y del heatmap (# fallas).")
+    st.stop()
+
+hm2_y_level = st.selectbox("Eje Y (nivel) — Heatmap # fallas", y_options2, index=0, key="hm2_y_level")
+
+# Reutilizar mismos Top X / Top Y (si quieres que sean iguales al 1er heatmap)
+hm2_top_equipos = hm_top_equipos
+hm2_top_y = hm_top_y
+
+tmp2 = fd_view.copy()
+tmp2[equipo_col] = tmp2[equipo_col].astype(str).str.upper().str.strip()
+tmp2[hm2_y_level] = tmp2[hm2_y_level].astype(str).str.upper().str.strip()
+
+# Seleccionar top equipos y top Y por CANTIDAD de fallas
+top_eq2 = (
+    tmp2.groupby(equipo_col)
+    .size()
+    .sort_values(ascending=False)
+    .head(int(hm2_top_equipos))
+    .index.tolist()
+)
+
+top_y2 = (
+    tmp2.groupby(hm2_y_level)
+    .size()
+    .sort_values(ascending=False)
+    .head(int(hm2_top_y))
+    .index.tolist()
+)
+
+tmp2 = tmp2[tmp2[equipo_col].isin(top_eq2) & tmp2[hm2_y_level].isin(top_y2)].copy()
+
+if tmp2.empty:
+    st.info("No hay datos para el heatmap (# fallas) con los Top seleccionados.")
+else:
+    pivot2 = (
+        tmp2.pivot_table(
+            index=hm2_y_level,
+            columns=equipo_col,
+            values="DOWNTIME_HR",  # no importa el valor: contamos registros
+            aggfunc="size",        # <-- cuenta fallas
+            fill_value=0
+        )
+    )
+
+    # Ordenar ejes por totales
+    pivot2 = pivot2.loc[pivot2.sum(axis=1).sort_values(ascending=False).index]
+    pivot2 = pivot2[pivot2.sum(axis=0).sort_values(ascending=False).index]
+
+    fig_hm2 = px.imshow(
+        pivot2,
+        aspect="auto",
+        labels=dict(x="Equipos", y=hm2_y_level, color="# Fallas"),
+    )
+    fig_hm2.update_layout(
+        title=f"Heatmap # Fallas — X: Equipos | Y: {hm2_y_level}",
+        title_x=0.5,
+        margin=dict(l=20, r=20, t=70, b=40),
+    )
+    st.plotly_chart(fig_hm2, use_container_width=True)
+
+
+# =========================
+# HEATMAP #2 (Down Time)
+# =========================
 
     st.subheader("Mapa de calor (Riesgo global) — Down Time (h)")
 
@@ -756,48 +957,84 @@ else:  # page == "Técnico"
     dt_hr = float(df_lvl["DOWNTIME_HR"].sum()) if not df_lvl.empty else 0.0
     mttr = (dt_hr / n_fallas) if n_fallas > 0 else np.nan
     mtbf = (to_real / n_fallas) if n_fallas > 0 else np.nan
+    disp_tec = (to_real / (to_real + dt_hr)) if (to_real + dt_hr) > 0 else np.nan
 
-    cards = [
-        kpi_card_html("Horas operadas reales (TO)", fmt_num(to_real), hint="Base para MTBF técnico"),
-        kpi_card_html("Down Time (h)", fmt_num(dt_hr), hint="Suma de DOWNTIME_HR"),
-        kpi_card_html("N° de fallas", f"{n_fallas:,}", hint="Conteo (FALLAS_DETALLE filtrado)"),
-        kpi_card_html("MTTR (h/falla)", fmt_num(mttr), hint="DT / #fallas"),
-        kpi_card_html("MTBF (h/falla)", fmt_num(mtbf), hint="TO real / #fallas"),
-    ]
-    render_kpi_row(cards, height=210, big=False)
+cards = [
+    kpi_card_html("Horas operadas reales (TO)", fmt_num(to_real), hint="Base para MTBF técnico"),
+    kpi_card_html("Down Time (h)", fmt_num(dt_hr), hint="Suma de DOWNTIME_HR"),
+    kpi_card_html("N° de fallas", f"{n_fallas:,}", hint="Conteo en FALLAS_DETALLE"),
+    kpi_card_html("MTTR (h/falla)", fmt_num(mttr), hint="DT / #fallas"),
+    kpi_card_html("MTBF (h/falla)", fmt_num(mtbf), hint="TO real / #fallas"),
+    kpi_card_html("Disponibilidad", fmt_pct(disp_tec), hint="TO / (TO + DT)"),
+]
+render_kpi_row(cards, height=205)
 
     st.divider()
 
-    # 3) Barras por nivel
-    st.subheader("3) Análisis de fallas por nivel (barras)")
+# =====================================================
+# 3) Análisis por nivel (barras) — SOLO 3 gráficos en 1 fila
+# =====================================================
+st.subheader("3) Análisis de fallas por nivel (barras)")
 
-    def bar_fallas(df_in, col, title):
-        if col is None or col not in df_in.columns:
-            st.info(f"No existe nivel: {title}")
-            return
-        g = df_in.groupby(col, dropna=True).size().reset_index(name="FALLAS")
-        g[col] = g[col].astype(str)
-        g = g.sort_values("FALLAS", ascending=False).head(15)
-        fig = px.bar(g, x="FALLAS", y=col, orientation="h", title=title)
-        fig.update_layout(title_x=0.5, margin=dict(l=10, r=10, t=60, b=10), yaxis_title="")
+def bar_fallas(df_in, col, title, top=15):
+    if col is None or col not in df_in.columns:
+        # Si no existe columna, no dibujamos nada (silencioso)
+        return None
+    g = df_in.groupby(col, dropna=True).size().reset_index(name="FALLAS")
+    g[col] = g[col].astype(str)
+    g = g.sort_values("FALLAS", ascending=False).head(int(top))
+    if g.empty:
+        return None
+    fig = px.bar(g, x="FALLAS", y=col, orientation="h", title=title)
+    fig.update_layout(title_x=0.5, margin=dict(l=10, r=10, t=50, b=10), yaxis_title="")
+    return fig
+
+# Contexto: respetar filtros jerárquicos aplicados hasta el nivel disponible
+df_context = fd.copy()
+if eq_sel != "(Todos)":
+    df_context = df_context[df_context[equipo_col].astype(str) == str(eq_sel)].copy()
+
+# Aplicar filtros ya elegidos (si existen)
+if sis_sel != "(Todos)" and sistema_col in df_context.columns:
+    df_context = df_context[df_context[sistema_col].astype(str) == str(sis_sel)].copy()
+
+# Si existe subsistema real y está seleccionado, también filtrar (pero NO graficar aquí)
+if subsis_col and sub_sel not in ["(Todos)", "(No disponible)"] and subsis_col in df_context.columns:
+    df_context = df_context[df_context[subsis_col].astype(str) == str(sub_sel)].copy()
+
+if com_sel not in ["(Todos)", "(No disponible)"] and comp_col and comp_col in df_context.columns:
+    df_context = df_context[df_context[comp_col].astype(str) == str(com_sel)].copy()
+
+if par_sel not in ["(Todos)", "(No disponible)"] and parte_col and parte_col in df_context.columns:
+    df_context = df_context[df_context[parte_col].astype(str) == str(par_sel)].copy()
+
+# Top para legibilidad
+top_barras = st.slider("Top por gráfico", min_value=5, max_value=30, value=15, step=1, key="tec_top_barras")
+
+# 3 gráficos en una sola fila
+c1, c2, c3 = st.columns(3)
+
+with c1:
+    fig = bar_fallas(df_context, sistema_col, "Fallas por Sistema (SUB UNIDAD)", top=top_barras)
+    if fig is not None:
         st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Sin datos para Sistema con los filtros actuales.")
 
-    df_context = fd.copy()
-    if eq_sel != "(Todos)":
-        df_context = df_context[df_context[equipo_col].astype(str) == str(eq_sel)].copy()
-    if sis_sel != "(Todos)" and sistema_col in df_context.columns:
-        df_context = df_context[df_context[sistema_col].astype(str) == str(sis_sel)].copy()
+with c2:
+    fig = bar_fallas(df_context, comp_col, "Fallas por Componente", top=top_barras)
+    if fig is not None:
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Sin datos para Componente con los filtros actuales.")
 
-    cA, cB = st.columns(2)
-    with cA:
-        bar_fallas(df_context, sistema_col, "Fallas por Sistema (SUB UNIDAD)")
-        if subsis_col:
-            bar_fallas(df_context, subsis_col, "Fallas por Sub sistema")
-        else:
-            st.info("No hay columna Sub sistema en tu archivo (se omite).")
-    with cB:
-        bar_fallas(df_context, comp_col, "Fallas por Componente")
-        bar_fallas(df_context, parte_col, "Fallas por Parte")
+with c3:
+    fig = bar_fallas(df_context, parte_col, "Fallas por Parte", top=top_barras)
+    if fig is not None:
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Sin datos para Parte con los filtros actuales.")
+
 
     st.divider()
 
@@ -829,77 +1066,3 @@ else:  # page == "Técnico"
             st.markdown(center_title(f"Top 10 {top_level} con Down Time alto"), unsafe_allow_html=True)
             d = g.sort_values("DT_HR", ascending=False).head(10)
             st.plotly_chart(px.bar(d, x="DT_HR", y="ITEM", orientation="h"), use_container_width=True)
-
-    st.divider()
-
-    # 5) Cuadrante
-    st.subheader("5) MTBF vs MTTR (cuadrante técnico)")
-
-    if top_level is None or top_level not in df_context.columns:
-        st.info("No hay nivel (COMPONENTE/PARTE) para el scatter.")
-    else:
-        g = df_context.groupby(top_level, dropna=True).agg(
-            FALLAS=("DOWNTIME_HR", "size"),
-            DT_HR=("DOWNTIME_HR", "sum")
-        ).reset_index().rename(columns={top_level: "ITEM"})
-        g["ITEM"] = g["ITEM"].astype(str)
-        g["MTTR_HR"] = np.where(g["FALLAS"] > 0, g["DT_HR"] / g["FALLAS"], np.nan)
-        g["MTBF_HR"] = np.where(g["FALLAS"] > 0, to_real / g["FALLAS"], np.nan)
-        g = g.dropna(subset=["MTTR_HR", "MTBF_HR"])
-
-        if g.empty:
-            st.info("No hay datos suficientes para el cuadrante.")
-        else:
-            fig = px.scatter(
-                g,
-                x="MTBF_HR",
-                y="MTTR_HR",
-                size="DT_HR",
-                hover_name="ITEM",
-                title="Cuadrante MTBF vs MTTR (tamaño = Down Time)"
-            )
-            fig.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20),
-                              xaxis_title="MTBF (h/falla)", yaxis_title="MTTR (h/falla)")
-            st.plotly_chart(fig, use_container_width=True)
-
-    st.divider()
-
-    # 6) Sankey
-    st.subheader("6) Análisis causa–consecuencia (Sankey) — opcional")
-
-    can_sankey = (sistema_col in df_context.columns) and (comp_col in df_context.columns) and (parte_col in df_context.columns)
-    if not can_sankey:
-        st.info("No hay columnas suficientes para Sankey (SUBUNIDAD → COMPONENTE → PARTE).")
-    else:
-        show_sankey = st.toggle("Mostrar Sankey", value=False, key="tec_sankey")
-        if show_sankey:
-            sk = df_context[[sistema_col, comp_col, parte_col, "DOWNTIME_HR"]].copy()
-            sk[sistema_col] = sk[sistema_col].astype(str)
-            sk[comp_col] = sk[comp_col].astype(str)
-            sk[parte_col] = sk[parte_col].astype(str)
-
-            a = sk.groupby([sistema_col, comp_col], dropna=True)["DOWNTIME_HR"].sum().reset_index()
-            b = sk.groupby([comp_col, parte_col], dropna=True)["DOWNTIME_HR"].sum().reset_index()
-
-            nodes = pd.Index(pd.concat([a[sistema_col], a[comp_col], b[comp_col], b[parte_col]]).unique())
-            node_map = {name: i for i, name in enumerate(nodes)}
-
-            sources, targets, values = [], [], []
-            for _, r in a.iterrows():
-                sources.append(node_map[str(r[sistema_col])])
-                targets.append(node_map[str(r[comp_col])])
-                values.append(float(r["DOWNTIME_HR"]))
-            for _, r in b.iterrows():
-                sources.append(node_map[str(r[comp_col])])
-                targets.append(node_map[str(r[parte_col])])
-                values.append(float(r["DOWNTIME_HR"]))
-
-            fig = go.Figure(data=[go.Sankey(
-                node=dict(label=nodes.tolist(), pad=12, thickness=14),
-                link=dict(source=sources, target=targets, value=values)
-            )])
-            fig.update_layout(
-                title="Sankey Down Time (h): SUB UNIDAD (Sistema) → COMPONENTE → PARTE",
-                margin=dict(l=20, r=20, t=60, b=20)
-            )
-            st.plotly_chart(fig, use_container_width=True)
