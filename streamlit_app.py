@@ -49,6 +49,18 @@ def find_first_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
             return c
     return None
 
+def safe_norm_str_series(s: pd.Series) -> pd.Series:
+    return s.astype(str).str.replace(".0", "", regex=False).str.strip()
+
+def infer_tipo_equipo_from_code(x: str) -> Optional[str]:
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return None
+    s = str(x).strip().upper()
+    # Regla simple: TRC = tractor. Si tienes otros prefijos de tractor, los agregas aquí.
+    if s.startswith("TRC"):
+        return "TRACTOR"
+    return "IMPLEMENTO"
+
 @st.cache_data(show_spinner=False)
 def load_tables() -> dict:
     ensure_data_unzipped()
@@ -80,7 +92,7 @@ def load_tables() -> dict:
     eventos["DT_MIN"] = pd.to_numeric(eventos["DT_MIN"], errors="coerce")
 
     def norm_str(s: pd.Series) -> pd.Series:
-        return s.astype(str).str.replace(".0", "", regex=False).str.strip()
+        return safe_norm_str_series(s)
 
     # Normalización IDs comunes
     for col in ["ID_TURNO", "ID_TRACTOR", "ID_IMPLEMENTO", "ID_LOTE", "ID_OPERADOR", "ID_PROCESO", "TURNO"]:
@@ -111,7 +123,7 @@ def load_tables() -> dict:
     if fallas_detalle is not None:
         fallas_detalle = norm_cols(fallas_detalle)
 
-        for c in ["ID_TURNO", "EQUIPO", "ID_EQUIPO", "TIPO_EQUIPO"]:
+        for c in ["ID_TURNO", "EQUIPO", "ID_EQUIPO", "ID_EQUIPO_AFECTADO", "TIPO_EQUIPO"]:
             if c in fallas_detalle.columns:
                 fallas_detalle[c] = norm_str(fallas_detalle[c])
 
@@ -119,17 +131,26 @@ def load_tables() -> dict:
         if "DOWNTIME_HR" in fallas_detalle.columns:
             fallas_detalle["DOWNTIME_HR"] = pd.to_numeric(fallas_detalle["DOWNTIME_HR"], errors="coerce")
         else:
-            tf = find_first_col(fallas_detalle, ["T_FALLA", "TFALLA", "TIEMPO_FALLA", "TIEMPO_DE_FALLA", "DOWNTIME"])
+            tf = find_first_col(
+                fallas_detalle,
+                ["T_FALLA", "TFALLA", "TIEMPO_FALLA", "TIEMPO_DE_FALLA", "DOWNTIME", "DT_HR"]
+            )
             if tf is not None:
                 fallas_detalle["DOWNTIME_HR"] = pd.to_numeric(fallas_detalle[tf], errors="coerce")
             else:
                 fallas_detalle["DOWNTIME_HR"] = np.nan
 
-        # aliases comunes
+        # aliases comunes (incluye VERBO y CAUSA)
         alias_map = {
             "SUB_UNIDAD": "SUBUNIDAD",
             "SUBSISTEMA": "SUBUNIDAD",
             "PIEZA": "PARTE",
+            "VERBO": "VERBO_TECNICO",
+            "VERBO_TECN": "VERBO_TECNICO",
+            "VERBO_TECNICO_FALLA": "VERBO_TECNICO",
+            "CAUSA": "CAUSA_FALLA",
+            "CAUSA_RAIZ": "CAUSA_FALLA",
+            "CAUSA_INMEDIATA": "CAUSA_FALLA",
         }
         for src, dst in alias_map.items():
             if src in fallas_detalle.columns and dst not in fallas_detalle.columns:
@@ -543,154 +564,104 @@ else:
 st.divider()
 
 # =========================================================
-# TOP 10 por Equipo (Operación, Downtime y Fallas)
+# TOP 10 TÉCNICO (SUBUNIDAD / COMPONENTE / PARTE / VERBO / CAUSA)
 # =========================================================
-st.subheader("Top 10 por Equipo (Operación, Downtime y Fallas)")
-
-h_to = horo_sel.copy()
-if vista_disp == "Tractor":
-    h_to = h_to[h_to["TIPO_EQUIPO"].astype(str).str.upper() == "TRACTOR"].copy()
-else:
-    h_to = h_to[h_to["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
-
-to_equ = h_to.groupby("ID_EQUIPO", dropna=True)["TO_HORO"].sum().reset_index().rename(columns={"TO_HORO": "TO_HR"})
-
-ev_rank = ev_sel[ev_sel["CATEGORIA_EVENTO"].astype(str).str.upper() == "FALLA"].copy()
-if not ev_rank.empty:
-    ev_rank["DT_HR"] = pd.to_numeric(ev_rank["DT_MIN"], errors="coerce") / 60.0
-else:
-    ev_rank["DT_HR"] = pd.Series(dtype=float)
-
-dt_equ = ev_rank.groupby("ID_EQUIPO_AFECTADO", dropna=True)["DT_HR"].sum().reset_index().rename(
-    columns={"ID_EQUIPO_AFECTADO": "ID_EQUIPO"}
-)
-fa_equ = ev_rank.groupby("ID_EQUIPO_AFECTADO", dropna=True).size().reset_index(name="FALLAS").rename(
-    columns={"ID_EQUIPO_AFECTADO": "ID_EQUIPO"}
-)
-
-top_ops = to_equ.merge(dt_equ, on="ID_EQUIPO", how="left").merge(fa_equ, on="ID_EQUIPO", how="left")
-top_ops = top_ops.fillna({"DT_HR": 0.0, "FALLAS": 0})
-top_ops["ID_EQUIPO"] = top_ops["ID_EQUIPO"].astype(str)
-
-c1, c2, c3 = st.columns(3)
-with c1:
-    st.markdown(center_title("Top 10 por Tiempo de Operación (TO)"), unsafe_allow_html=True)
-    d = top_ops.sort_values("TO_HR", ascending=False).head(10)
-    fig = px.bar(d, x="TO_HR", y="ID_EQUIPO", orientation="h")
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig, use_container_width=True)
-with c2:
-    st.markdown(center_title("Top 10 por Downtime (h)"), unsafe_allow_html=True)
-    d = top_ops.sort_values("DT_HR", ascending=False).head(10)
-    fig = px.bar(d, x="DT_HR", y="ID_EQUIPO", orientation="h")
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig, use_container_width=True)
-with c3:
-    st.markdown(center_title("Top 10 por Cantidad de Fallas"), unsafe_allow_html=True)
-    d = top_ops.sort_values("FALLAS", ascending=False).head(10)
-    fig = px.bar(d, x="FALLAS", y="ID_EQUIPO", orientation="h")
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig, use_container_width=True)
-
-st.divider()
-
-# =========================================================
-# TOP 10 CONFIABILIDAD POR EQUIPO
-# =========================================================
-st.subheader("Top 10 por Equipo (Confiabilidad)")
-
-to_all = horo_sel.groupby(["TIPO_EQUIPO", "ID_EQUIPO"], dropna=True)["TO_HORO"].sum().reset_index().rename(
-    columns={"TO_HORO": "TO_HR"}
-)
-to_all["TIPO_EQUIPO"] = to_all["TIPO_EQUIPO"].astype(str).str.upper()
-to_all["ID_EQUIPO"] = to_all["ID_EQUIPO"].astype(str)
-
-dt_all = ev_rank.groupby("ID_EQUIPO_AFECTADO", dropna=True).agg(
-    DT_HR=("DT_HR", "sum"),
-    FALLAS=("DT_HR", "size")
-).reset_index().rename(columns={"ID_EQUIPO_AFECTADO": "ID_EQUIPO"})
-dt_all["ID_EQUIPO"] = dt_all["ID_EQUIPO"].astype(str)
-
-top_rel = to_all.merge(dt_all, on="ID_EQUIPO", how="left").fillna({"DT_HR": 0.0, "FALLAS": 0})
-top_rel["MTTR_HR"] = np.where(top_rel["FALLAS"] > 0, top_rel["DT_HR"] / top_rel["FALLAS"], np.nan)
-top_rel["MTBF_HR"] = np.where(top_rel["FALLAS"] > 0, top_rel["TO_HR"] / top_rel["FALLAS"], np.nan)
-top_rel["DISP"] = np.where((top_rel["TO_HR"] + top_rel["DT_HR"]) > 0, top_rel["TO_HR"] / (top_rel["TO_HR"] + top_rel["DT_HR"]), np.nan)
-
-if vista_disp == "Tractor":
-    top_rel = top_rel[top_rel["TIPO_EQUIPO"] == "TRACTOR"].copy()
-elif vista_disp == "Implemento":
-    top_rel = top_rel[top_rel["TIPO_EQUIPO"] == "IMPLEMENTO"].copy()
-
-colA, colB, colC = st.columns(3)
-with colA:
-    st.markdown(center_title("MTTR alto (peor)"), unsafe_allow_html=True)
-    d = top_rel.dropna(subset=["MTTR_HR"]).sort_values("MTTR_HR", ascending=False).head(10)
-    fig = px.bar(d, x="MTTR_HR", y="ID_EQUIPO", orientation="h")
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig, use_container_width=True)
-with colB:
-    st.markdown(center_title("MTBF bajo (peor)"), unsafe_allow_html=True)
-    d = top_rel.dropna(subset=["MTBF_HR"]).sort_values("MTBF_HR", ascending=True).head(10)
-    fig = px.bar(d, x="MTBF_HR", y="ID_EQUIPO", orientation="h")
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig, use_container_width=True)
-with colC:
-    st.markdown(center_title("Disponibilidad baja (peor)"), unsafe_allow_html=True)
-    d = top_rel.dropna(subset=["DISP"]).sort_values("DISP", ascending=True).head(10)
-    fig = px.bar(d, x="DISP", y="ID_EQUIPO", orientation="h")
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig, use_container_width=True)
-
-st.divider()
-
-# =========================================================
-# TOP 10 TÉCNICO (SUBUNIDAD / COMPONENTE / PARTE)
-# =========================================================
-st.subheader("Top 10 Técnico (Subunidad / Componente / Parte) por Tiempo de Falla (h)")
+st.subheader("Top 10 Técnico (Subunidad / Componente / Parte / Verbo / Causa) por Tiempo de Falla (h)")
 
 if fd_sel is None:
     st.info("No se encontró **FALLAS_DETALLE_NORMALIZADO.csv** dentro del ZIP (data_normalizada/).")
 else:
     fd_sel = norm_cols(fd_sel)
 
+    # Asegurar DOWNTIME_HR
     if "DOWNTIME_HR" not in fd_sel.columns:
-        tf = find_first_col(fd_sel, ["T_FALLA", "TFALLA", "TIEMPO_FALLA", "TIEMPO_DE_FALLA", "DOWNTIME"])
+        tf = find_first_col(fd_sel, ["T_FALLA", "TFALLA", "TIEMPO_FALLA", "TIEMPO_DE_FALLA", "DOWNTIME", "DT_HR"])
         if tf is not None:
             fd_sel["DOWNTIME_HR"] = pd.to_numeric(fd_sel[tf], errors="coerce")
         else:
             fd_sel["DOWNTIME_HR"] = np.nan
 
-    if "TIPO_EQUIPO" in fd_sel.columns:
-        if vista_disp == "Tractor":
-            fd_view = fd_sel[fd_sel["TIPO_EQUIPO"].astype(str).str.upper() == "TRACTOR"].copy()
-        elif vista_disp == "Implemento":
-            fd_view = fd_sel[fd_sel["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
-        else:
-            fd_view = fd_sel.copy()
+    # Detectar columna de equipo
+    equipo_col = find_first_col(fd_sel, ["EQUIPO", "ID_EQUIPO", "ID_EQUIPO_AFECTADO"])
+    if equipo_col is None:
+        # Si no existe, igual mostramos top10 pero advertimos
+        st.warning("FALLAS_DETALLE_NORMALIZADO no tiene columna EQUIPO/ID_EQUIPO. Se mostrará sin filtro por equipo.")
+        fd_sel["__EQUIPO__"] = None
+        equipo_col = "__EQUIPO__"
+
+    # Asegurar TIPO_EQUIPO (si no viene, inferir por prefijo del equipo)
+    if "TIPO_EQUIPO" not in fd_sel.columns or fd_sel["TIPO_EQUIPO"].isna().all():
+        fd_sel["TIPO_EQUIPO"] = fd_sel[equipo_col].apply(infer_tipo_equipo_from_code)
     else:
-        fd_view = fd_sel.copy()
+        fd_sel["TIPO_EQUIPO"] = fd_sel["TIPO_EQUIPO"].astype(str).str.upper().str.strip()
+        # fallback si hay vacíos
+        mask_na = fd_sel["TIPO_EQUIPO"].isin(["", "NAN", "NONE"])
+        if mask_na.any():
+            fd_sel.loc[mask_na, "TIPO_EQUIPO"] = fd_sel.loc[mask_na, equipo_col].apply(infer_tipo_equipo_from_code)
 
-    def top10_bar(df, col, title):
-        if col not in df.columns:
-            st.info(f"No existe la columna **{col}** en FALLAS_DETALLE_NORMALIZADO.")
-            return
-        g = (
-            df.groupby(col, dropna=True)["DOWNTIME_HR"].sum()
-            .reset_index().sort_values("DOWNTIME_HR", ascending=False).head(10)
-        )
-        g[col] = g[col].astype(str)
-        fig = px.bar(g, x="DOWNTIME_HR", y=col, orientation="h")
-        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Tiempo de Falla (h)", yaxis_title="")
-        st.markdown(center_title(title), unsafe_allow_html=True)
-        st.plotly_chart(fig, use_container_width=True)
+    # ---- FILTRO FINO por selección TRC/IMP + vista ----
+    fd_view = fd_sel.copy()
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        top10_bar(fd_view, "SUBUNIDAD", "Top 10 SUBUNIDAD")
-    with c2:
-        top10_bar(fd_view, "COMPONENTE", "Top 10 COMPONENTE")
-    with c3:
-        top10_bar(fd_view, "PARTE", "Top 10 PARTE")
+    # 1) Si el usuario seleccionó tractor/implemento específico, filtrar por esos códigos (en vista Sistema, aplica a ambos)
+    allowed_equipos = []
+    if trc_sel != "(Todos)":
+        allowed_equipos.append(str(trc_sel).upper())
+    if imp_sel != "(Todos)":
+        allowed_equipos.append(str(imp_sel).upper())
+
+    if allowed_equipos and equipo_col != "__EQUIPO__":
+        fd_view = fd_view[fd_view[equipo_col].astype(str).str.upper().isin(allowed_equipos)].copy()
+
+    # 2) Luego aplicar vista (Tractor / Implemento / Sistema)
+    if vista_disp == "Tractor":
+        fd_view = fd_view[fd_view["TIPO_EQUIPO"] == "TRACTOR"].copy()
+    elif vista_disp == "Implemento":
+        fd_view = fd_view[fd_view["TIPO_EQUIPO"] == "IMPLEMENTO"].copy()
+    else:
+        # Sistema: deja ambos (pero si eligió TRC/IMP específico, ya quedó filtrado arriba)
+        pass
+
+    # Limpiar downtime
+    fd_view["DOWNTIME_HR"] = pd.to_numeric(fd_view["DOWNTIME_HR"], errors="coerce").fillna(0.0)
+
+    if fd_view.empty:
+        st.info("Con los filtros actuales, no hay registros en FALLAS_DETALLE para construir el Top 10 técnico.")
+    else:
+        def top10_bar(df, col, title):
+            if col not in df.columns:
+                st.info(f"No existe la columna **{col}** en FALLAS_DETALLE_NORMALIZADO.")
+                return
+            g = (
+                df.groupby(col, dropna=True)["DOWNTIME_HR"].sum()
+                .reset_index()
+                .sort_values("DOWNTIME_HR", ascending=False)
+                .head(10)
+            )
+            g[col] = g[col].astype(str)
+            fig = px.bar(g, x="DOWNTIME_HR", y=col, orientation="h")
+            fig.update_layout(
+                margin=dict(l=10, r=10, t=10, b=10),
+                xaxis_title="Tiempo de Falla (h)",
+                yaxis_title="",
+            )
+            st.markdown(center_title(title), unsafe_allow_html=True)
+            st.plotly_chart(fig, use_container_width=True)
+
+        # 3 gráficos arriba
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            top10_bar(fd_view, "SUBUNIDAD", "Top 10 SUBUNIDAD")
+        with c2:
+            top10_bar(fd_view, "COMPONENTE", "Top 10 COMPONENTE")
+        with c3:
+            top10_bar(fd_view, "PARTE", "Top 10 PARTE")
+
+        # 2 gráficos abajo (VERBO y CAUSA)
+        c4, c5 = st.columns(2)
+        with c4:
+            top10_bar(fd_view, "VERBO_TECNICO", "Top 10 VERBO TÉCNICO")
+        with c5:
+            top10_bar(fd_view, "CAUSA_FALLA", "Top 10 CAUSA DE FALLA")
 
 st.divider()
 
