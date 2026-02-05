@@ -779,7 +779,7 @@ else:
         st.stop()
 
     # Selector Y (por defecto: sistemas = SUBUNIDAD)
-    y_options = [c for c in ["SUBUNIDAD", "COMPONENTE"] if c in fd_view.columns]
+    y_options = [c for c in ["SUBUNIDAD", "COMPONENTE", "PIEZA"] if c in fd_view.columns]
     if not y_options:
         st.info("No encontré columnas para el eje Y del heatmap (SUBUNIDAD/COMPONENTE).")
         st.stop()
