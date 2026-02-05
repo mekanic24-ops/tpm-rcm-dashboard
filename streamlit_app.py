@@ -152,7 +152,7 @@ def load_tables() -> dict:
                 fallas_detalle["DOWNTIME_HR"] = np.nan
 
         alias_map = {
-            "SUB_UNIDAD": "SUBUNIDAD",     # Sistema real
+            "SUB_UNIDAD": "SUBUNIDAD",
             "PIEZA": "PARTE",
             "VERBO": "VERBO_TECNICO",
             "VERBO_TECN": "VERBO_TECNICO",
@@ -324,7 +324,7 @@ def pareto_chart(df: pd.DataFrame, dim_col: str, val_col: str, top_n: int, title
         yaxis2=dict(title="% Acum", overlaying="y", side="right", tickformat=".0%"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 # =========================================================
 # LOAD
@@ -481,7 +481,7 @@ else:  # Implemento
 
 mttr_hr = (dt_base / n_base) if n_base > 0 else np.nan
 mtbf_hr = (to_base / n_base) if n_base > 0 else np.nan
-disp = (to_base / (to_base + dt_base)) if (to_base + dt_base) > 0 else np.nan
+disp = (to_base / (to_base + dt_base)) if (to_base is not None and (to_base + dt_base) > 0) else np.nan
 
 # =========================================================
 # PÁGINAS
@@ -503,7 +503,7 @@ if page == "Dashboard":
                       hint="Azul <1.2 | Verde 1.2–2.5 | Rojo >2.5"),
         kpi_card_html("MTBF (h/falla)", fmt_num(mtbf_hr), color=mtbf_color(mtbf_hr),
                       hint="Rojo <100 | Verde 100–500 | Azul >500"),
-        kpi_card_html("Disponibilidad", fmt_pct(disp, dec=1), color=disp_color(disp),
+        kpi_card_html("Disponibilidad", fmt_pct(disp), color=disp_color(disp),
                       hint="Rojo <90% | Verde 90–95% | Azul >95%"),
     ]
     render_kpi_row(row2, height=210, big=True)
@@ -511,7 +511,7 @@ if page == "Dashboard":
     st.divider()
 
     # =========================================================
-    # EVOLUCIÓN POR MES-AÑO (6 gráficos)
+    # EVOLUCIÓN POR MES-AÑO (solo en Dashboard)
     # =========================================================
     st.subheader("Evolución por mes-año (MTTR, MTBF, Disponibilidad, Fallas, TO y Down Time)")
 
@@ -549,26 +549,25 @@ if page == "Dashboard":
         turn_mes = base[["ID_TURNO", "MES", "ID_TRACTOR", "ID_IMPLEMENTO"]].copy()
         turn_mes["ID_TURNO"] = turn_mes["ID_TURNO"].astype(str)
 
-        # TO por mes según vista
         h2 = h.merge(turn_mes[["ID_TURNO", "MES"]], on="ID_TURNO", how="left")
+
         if vista_disp == "Tractor":
             h2 = h2[h2["TIPO_EQUIPO"].astype(str).str.upper() == "TRACTOR"].copy()
         elif vista_disp == "Implemento":
             h2 = h2[h2["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
         else:
             h2 = h2[h2["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
+
         to_mes = h2.groupby("MES", dropna=True)["TO_HORO"].sum().reset_index(name="TO_HR")
 
-        # DT/Fallas por mes según vista
         e2 = e.merge(turn_mes, on="ID_TURNO", how="left")
+
         if vista_disp == "Tractor":
             trcs = base["ID_TRACTOR"].dropna().astype(str).unique().tolist()
             e2 = e2[e2["ID_EQUIPO_AFECTADO"].astype(str).isin(trcs)]
         elif vista_disp == "Implemento":
             imps = base["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist()
             e2 = e2[e2["ID_EQUIPO_AFECTADO"].astype(str).isin(imps)]
-        else:
-            pass
 
         dt_mes = e2.groupby("MES", dropna=True).agg(
             DT_HR=("DT_HR", "sum"),
@@ -587,33 +586,31 @@ if page == "Dashboard":
         with r1c1:
             fig1 = px.bar(evo, x="MES", y="MTTR_HR", title="MTTR (h/falla) por mes")
             fig1.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            st.plotly_chart(fig1, use_container_width=True)
+            st.plotly_chart(fig1, width="stretch")
         with r1c2:
             fig2 = px.bar(evo, x="MES", y="MTBF_HR", title="MTBF (h/falla) por mes")
             fig2.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, width="stretch")
 
         r2c1, r2c2 = st.columns(2)
         with r2c1:
             fig3 = px.bar(evo, x="MES", y="DISP", title="Disponibilidad (TO/(TO+DT)) por mes")
             fig3.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20), yaxis_tickformat=".0%")
-            st.plotly_chart(fig3, use_container_width=True)
+            st.plotly_chart(fig3, width="stretch")
         with r2c2:
             fig4 = px.bar(evo, x="MES", y="FALLAS", title="Cantidad de fallas por mes")
             fig4.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            st.plotly_chart(fig4, use_container_width=True)
+            st.plotly_chart(fig4, width="stretch")
 
         r3c1, r3c2 = st.columns(2)
         with r3c1:
             fig5 = px.bar(evo, x="MES", y="TO_HR", title="Tiempo de Operación (TO) por mes (h)")
             fig5.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            st.plotly_chart(fig5, use_container_width=True)
+            st.plotly_chart(fig5, width="stretch")
         with r3c2:
             fig6 = px.bar(evo, x="MES", y="DT_HR", title="Down Time por mes (h)")
             fig6.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            st.plotly_chart(fig6, use_container_width=True)
-
-    st.divider()
+            st.plotly_chart(fig6, width="stretch")
 
     st.subheader("Descargar datos filtrados")
     st.download_button(
@@ -644,7 +641,7 @@ if page == "Dashboard":
 
 elif page == "Paretos":
     st.title("Paretos de Fallas + Mapas de calor")
-    st.caption("Análisis por Down Time (h) y por Cantidad de Fallas con heatmaps Equipo vs Nivel.")
+    st.caption("Paretos por Down Time (h) y heatmaps por Equipo vs Nivel (SUBUNIDAD/COMPONENTE/PARTE).")
 
     if fd_sel is None or fd_sel.empty:
         st.info("No se encontró **FALLAS_DETALLE_NORMALIZADO.csv** o no hay datos con los filtros actuales.")
@@ -680,14 +677,13 @@ elif page == "Paretos":
     else:
         fd_view["TIPO_EQUIPO"] = fd_view["TIPO_EQUIPO"].astype(str).str.upper().str.strip()
 
-    # Filtrado por vista
     if vista_disp == "Tractor":
         fd_view = fd_view[fd_view["TIPO_EQUIPO"] == "TRACTOR"].copy()
     elif vista_disp == "Implemento":
         fd_view = fd_view[fd_view["TIPO_EQUIPO"] == "IMPLEMENTO"].copy()
 
     if fd_view.empty:
-        st.info("Con los filtros actuales, no hay registros en FALLAS_DETALLE para construir Paretos/Heatmaps.")
+        st.info("Con los filtros actuales, no hay registros en FALLAS_DETALLE para construir Paretos/Heatmap.")
         st.stop()
 
     st.subheader("Paretos (Down Time h)")
@@ -709,118 +705,124 @@ elif page == "Paretos":
 
     st.divider()
 
-    # ===== Heatmap Downtime (h)
-    st.subheader("Heatmap #1 — Down Time (h)")
-
+    # -------------------------
+    # Controles compartidos TopX/TopY
+    # -------------------------
+    st.subheader("Mapas de calor (Equipos vs Nivel)")
     y_options = [c for c in ["SUBUNIDAD", "COMPONENTE", "PARTE"] if c in fd_view.columns]
     if not y_options:
         st.info("No encontré columnas para el eje Y (SUBUNIDAD/COMPONENTE/PARTE).")
         st.stop()
 
-    hm_y_level = st.selectbox("Eje Y (nivel) — Downtime", y_options, index=0, key="hm_y_level_dt")
-    hm_top_equipos = st.slider("Top equipos (X) — Downtime", min_value=10, max_value=120, value=40, step=5, key="hm_top_equipos_dt")
-    hm_top_y = st.slider("Top Y (filas) — Downtime", min_value=5, max_value=60, value=20, step=5, key="hm_top_y_dt")
+    colA, colB, colC = st.columns(3)
+    with colA:
+        hm_y_level = st.selectbox("Eje Y (nivel)", y_options, index=0, key="hm_y_level_shared")
+    with colB:
+        hm_top_equipos = st.slider("Top equipos (X)", min_value=10, max_value=200, value=40, step=5, key="hm_top_equipos_shared")
+    with colC:
+        hm_top_y = st.slider("Top Y (filas)", min_value=5, max_value=80, value=20, step=5, key="hm_top_y_shared")
 
-    tmp = fd_view.copy()
-    tmp[equipo_col] = tmp[equipo_col].astype(str).str.upper().str.strip()
-    tmp[hm_y_level] = tmp[hm_y_level].astype(str).str.upper().str.strip()
+    # -------------------------
+    # HEATMAP 1: Down Time (h)
+    # -------------------------
+    st.markdown("### Heatmap 1 — Down Time (h)")
 
-    top_eq = (
-        tmp.groupby(equipo_col)["DOWNTIME_HR"].sum()
+    tmp_dt = fd_view.copy()
+    tmp_dt[equipo_col] = tmp_dt[equipo_col].astype(str).str.upper().str.strip()
+    tmp_dt[hm_y_level] = tmp_dt[hm_y_level].astype(str).str.upper().str.strip()
+
+    top_eq_dt = (
+        tmp_dt.groupby(equipo_col)["DOWNTIME_HR"].sum()
         .sort_values(ascending=False)
         .head(int(hm_top_equipos))
         .index.tolist()
     )
-    top_y = (
-        tmp.groupby(hm_y_level)["DOWNTIME_HR"].sum()
+    top_y_dt = (
+        tmp_dt.groupby(hm_y_level)["DOWNTIME_HR"].sum()
         .sort_values(ascending=False)
         .head(int(hm_top_y))
         .index.tolist()
     )
 
-    tmp = tmp[tmp[equipo_col].isin(top_eq) & tmp[hm_y_level].isin(top_y)].copy()
+    tmp_dt = tmp_dt[tmp_dt[equipo_col].isin(top_eq_dt) & tmp_dt[hm_y_level].isin(top_y_dt)].copy()
 
-    if tmp.empty:
-        st.info("No hay datos para el heatmap Downtime con los Top seleccionados.")
+    if tmp_dt.empty:
+        st.info("No hay datos para el heatmap de Down Time con los Top seleccionados.")
     else:
-        pivot = tmp.pivot_table(
+        pivot_dt = tmp_dt.pivot_table(
             index=hm_y_level,
             columns=equipo_col,
             values="DOWNTIME_HR",
             aggfunc="sum",
             fill_value=0.0
         )
-        pivot = pivot.loc[pivot.sum(axis=1).sort_values(ascending=False).index]
-        pivot = pivot[pivot.sum(axis=0).sort_values(ascending=False).index]
+        pivot_dt = pivot_dt.loc[pivot_dt.sum(axis=1).sort_values(ascending=False).index]
+        pivot_dt = pivot_dt[pivot_dt.sum(axis=0).sort_values(ascending=False).index]
 
-        fig_hm = px.imshow(
-            pivot,
+        fig_hm_dt = px.imshow(
+            pivot_dt,
             aspect="auto",
             labels=dict(x="Equipos", y=hm_y_level, color="Down Time (h)"),
         )
-        fig_hm.update_layout(
-            title=f"Heatmap Down Time (h) — X: Equipos | Y: {hm_y_level}",
+        fig_hm_dt.update_layout(
+            title=f"Down Time (h) — X: Equipos | Y: {hm_y_level}",
             title_x=0.5,
             margin=dict(l=20, r=20, t=70, b=40),
         )
-        st.plotly_chart(fig_hm, use_container_width=True)
+        st.plotly_chart(fig_hm_dt, width="stretch")
 
-    st.divider()
+    # -------------------------
+    # HEATMAP 2: # Fallas (count)
+    # -------------------------
+    st.markdown("### Heatmap 2 — Cantidad de fallas (#)")
 
-    # ===== Heatmap Cantidad de Fallas
-    st.subheader("Heatmap #2 — Cantidad de fallas (#)")
+    tmp_ct = fd_view.copy()
+    tmp_ct[equipo_col] = tmp_ct[equipo_col].astype(str).str.upper().str.strip()
+    tmp_ct[hm_y_level] = tmp_ct[hm_y_level].astype(str).str.upper().str.strip()
 
-    hm2_y_level = st.selectbox("Eje Y (nivel) — # fallas", y_options, index=0, key="hm_y_level_cnt")
-    hm2_top_equipos = st.slider("Top equipos (X) — # fallas", min_value=10, max_value=120, value=40, step=5, key="hm_top_equipos_cnt")
-    hm2_top_y = st.slider("Top Y (filas) — # fallas", min_value=5, max_value=60, value=20, step=5, key="hm_top_y_cnt")
-
-    tmp2 = fd_view.copy()
-    tmp2[equipo_col] = tmp2[equipo_col].astype(str).str.upper().str.strip()
-    tmp2[hm2_y_level] = tmp2[hm2_y_level].astype(str).str.upper().str.strip()
-
-    top_eq2 = (
-        tmp2.groupby(equipo_col).size()
+    top_eq_ct = (
+        tmp_ct.groupby(equipo_col).size()
         .sort_values(ascending=False)
-        .head(int(hm2_top_equipos))
+        .head(int(hm_top_equipos))
         .index.tolist()
     )
-    top_y2 = (
-        tmp2.groupby(hm2_y_level).size()
+    top_y_ct = (
+        tmp_ct.groupby(hm_y_level).size()
         .sort_values(ascending=False)
-        .head(int(hm2_top_y))
+        .head(int(hm_top_y))
         .index.tolist()
     )
 
-    tmp2 = tmp2[tmp2[equipo_col].isin(top_eq2) & tmp2[hm2_y_level].isin(top_y2)].copy()
+    tmp_ct = tmp_ct[tmp_ct[equipo_col].isin(top_eq_ct) & tmp_ct[hm_y_level].isin(top_y_ct)].copy()
 
-    if tmp2.empty:
-        st.info("No hay datos para el heatmap # fallas con los Top seleccionados.")
+    if tmp_ct.empty:
+        st.info("No hay datos para el heatmap de Cantidad de fallas con los Top seleccionados.")
     else:
-        pivot2 = tmp2.pivot_table(
-            index=hm2_y_level,
+        pivot_ct = tmp_ct.pivot_table(
+            index=hm_y_level,
             columns=equipo_col,
-            values="DOWNTIME_HR",
-            aggfunc="size",     # cuenta fallas
+            values="DOWNTIME_HR",  # no importa cuál; usamos size
+            aggfunc="size",
             fill_value=0
         )
-        pivot2 = pivot2.loc[pivot2.sum(axis=1).sort_values(ascending=False).index]
-        pivot2 = pivot2[pivot2.sum(axis=0).sort_values(ascending=False).index]
+        pivot_ct = pivot_ct.loc[pivot_ct.sum(axis=1).sort_values(ascending=False).index]
+        pivot_ct = pivot_ct[pivot_ct.sum(axis=0).sort_values(ascending=False).index]
 
-        fig_hm2 = px.imshow(
-            pivot2,
+        fig_hm_ct = px.imshow(
+            pivot_ct,
             aspect="auto",
-            labels=dict(x="Equipos", y=hm2_y_level, color="# Fallas"),
+            labels=dict(x="Equipos", y=hm_y_level, color="# Fallas"),
         )
-        fig_hm2.update_layout(
-            title=f"Heatmap # Fallas — X: Equipos | Y: {hm2_y_level}",
+        fig_hm_ct.update_layout(
+            title=f"# Fallas — X: Equipos | Y: {hm_y_level}",
             title_x=0.5,
             margin=dict(l=20, r=20, t=70, b=40),
         )
-        st.plotly_chart(fig_hm2, use_container_width=True)
+        st.plotly_chart(fig_hm_ct, width="stretch")
 
 else:  # page == "Técnico"
     st.title("Dashboard Técnico (acción y mejora)")
-    st.caption("Objetivo: ¿Qué falla? ¿Dónde intervenir primero? ¿Qué atacar con RCM?")
+    st.caption("Objetivo: ¿Qué falla? ¿Dónde intervenir primero? ¿Preventivo o correctivo? ¿Qué atacar con RCM?")
 
     if fd_sel is None or fd_sel.empty:
         st.warning("No hay FALLAS_DETALLE filtradas para construir el Dashboard Técnico.")
@@ -860,9 +862,7 @@ else:  # page == "Técnico"
         st.error("No existe SUB_UNIDAD/SUBUNIDAD en FALLAS_DETALLE para usar como Sistema.")
         st.stop()
 
-    # =====================================================
-    # 1) Filtros jerárquicos
-    # =====================================================
+    # 1) Cascada
     st.subheader("1) Filtros jerárquicos (cascada)")
 
     eq_from_fd = sorted(fd[equipo_col].dropna().astype(str).unique().tolist())
@@ -891,7 +891,7 @@ else:  # page == "Técnico"
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        sis_sel, df_lvl = casc_select("Sistema (SUB UNIDAD)", sistema_col, df_lvl, "tec_sis")
+        sis_sel, df_lvl = casc_select("Sistema (SUB UNIDAD)", sistema_col, df_lvl, "tec_sis", disabled=False)
     with c2:
         sub_sel, df_lvl = casc_select("Sub sistema", subsis_col, df_lvl, "tec_sub", disabled=(subsis_col is None))
     with c3:
@@ -901,9 +901,7 @@ else:  # page == "Técnico"
 
     st.divider()
 
-    # =====================================================
-    # 2) KPIs técnicos (incluye disponibilidad)
-    # =====================================================
+    # 2) KPIs técnicos
     st.subheader("2) KPIs técnicos (ya filtrados)")
 
     if eq_sel != "(Todos)":
@@ -917,21 +915,20 @@ else:  # page == "Técnico"
     mtbf = (to_real / n_fallas) if n_fallas > 0 else np.nan
     disp_tec = (to_real / (to_real + dt_hr)) if (to_real + dt_hr) > 0 else np.nan
 
+    # Disponibilidad al final (misma fila)
     cards = [
         kpi_card_html("Horas operadas reales (TO)", fmt_num(to_real), hint="Base para MTBF técnico"),
         kpi_card_html("Down Time (h)", fmt_num(dt_hr), hint="Suma de DOWNTIME_HR"),
         kpi_card_html("N° de fallas", f"{n_fallas:,}", hint="Conteo en FALLAS_DETALLE"),
         kpi_card_html("MTTR (h/falla)", fmt_num(mttr), hint="DT / #fallas"),
         kpi_card_html("MTBF (h/falla)", fmt_num(mtbf), hint="TO real / #fallas"),
-        kpi_card_html("Disponibilidad", fmt_pct(disp_tec, dec=1), hint="TO / (TO + DT)"),
+        kpi_card_html("Disponibilidad", fmt_pct(disp_tec), hint="TO / (TO + DT)"),
     ]
     render_kpi_row(cards, height=205)
 
     st.divider()
 
-    # =====================================================
-    # 3) Análisis por nivel (SOLO 3 gráficos, 1 fila)
-    # =====================================================
+    # 3) 3 gráficos en 1 fila
     st.subheader("3) Análisis de fallas por nivel (barras)")
 
     def bar_fallas(df_in, col, title, top=15):
@@ -953,24 +950,62 @@ else:  # page == "Técnico"
         df_context = df_context[df_context[sistema_col].astype(str) == str(sis_sel)].copy()
     if subsis_col and sub_sel not in ["(Todos)", "(No disponible)"] and subsis_col in df_context.columns:
         df_context = df_context[df_context[subsis_col].astype(str) == str(sub_sel)].copy()
-    if comp_col and com_sel not in ["(Todos)", "(No disponible)"] and comp_col in df_context.columns:
+    if com_sel not in ["(Todos)", "(No disponible)"] and comp_col and comp_col in df_context.columns:
         df_context = df_context[df_context[comp_col].astype(str) == str(com_sel)].copy()
-    if parte_col and par_sel not in ["(Todos)", "(No disponible)"] and parte_col in df_context.columns:
+    if par_sel not in ["(Todos)", "(No disponible)"] and parte_col and parte_col in df_context.columns:
         df_context = df_context[df_context[parte_col].astype(str) == str(par_sel)].copy()
 
     top_barras = st.slider("Top por gráfico", min_value=5, max_value=30, value=15, step=1, key="tec_top_barras")
 
     cA, cB, cC = st.columns(3)
     with cA:
-        fig = bar_fallas(df_context, sistema_col, "Fallas por Sistema (SUB UNIDAD)", top=top_barras)
-        st.plotly_chart(fig, use_container_width=True) if fig else st.info("Sin datos para Sistema.")
+        figA = bar_fallas(df_context, sistema_col, "Fallas por Sistema (SUB UNIDAD)", top=top_barras)
+        if figA is None:
+            st.info("Sin datos para Sistema con los filtros actuales.")
+        else:
+            st.plotly_chart(figA, width="stretch")
+
     with cB:
-        fig = bar_fallas(df_context, comp_col, "Fallas por Componente", top=top_barras)
-        st.plotly_chart(fig, use_container_width=True) if fig else st.info("Sin datos para Componente.")
+        figB = bar_fallas(df_context, comp_col, "Fallas por Componente", top=top_barras)
+        if figB is None:
+            st.info("Sin datos para Componente con los filtros actuales.")
+        else:
+            st.plotly_chart(figB, width="stretch")
+
     with cC:
-        fig = bar_fallas(df_context, parte_col, "Fallas por Parte", top=top_barras)
-        st.plotly_chart(fig, use_container_width=True) if fig else st.info("Sin datos para Parte.")
+        figC = bar_fallas(df_context, parte_col, "Fallas por Parte", top=top_barras)
+        if figC is None:
+            st.info("Sin datos para Parte con los filtros actuales.")
+        else:
+            st.plotly_chart(figC, width="stretch")
 
     st.divider()
 
-    # (Si quieres, aquí continúas con tus secciones 4, 5, 6... sin romper indentación)
+    # 4) Top técnicos
+    st.subheader("4) Top técnicos (dónde atacar primero)")
+
+    top_level = comp_col if (comp_col and comp_col in df_context.columns) else parte_col
+    if top_level is None or top_level not in df_context.columns:
+        st.info("No hay COMPONENTE/PARTE para construir Top técnicos.")
+    else:
+        g = df_context.groupby(top_level, dropna=True).agg(
+            FALLAS=("DOWNTIME_HR", "size"),
+            DT_HR=("DOWNTIME_HR", "sum")
+        ).reset_index().rename(columns={top_level: "ITEM"})
+        g["ITEM"] = g["ITEM"].astype(str)
+        g["MTTR_HR"] = np.where(g["FALLAS"] > 0, g["DT_HR"] / g["FALLAS"], np.nan)
+        g["MTBF_HR"] = np.where(g["FALLAS"] > 0, to_real / g["FALLAS"], np.nan)
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown(center_title(f"Top 10 {top_level} con MTTR alto"), unsafe_allow_html=True)
+            d = g.dropna(subset=["MTTR_HR"]).sort_values("MTTR_HR", ascending=False).head(10)
+            st.plotly_chart(px.bar(d, x="MTTR_HR", y="ITEM", orientation="h"), width="stretch")
+        with c2:
+            st.markdown(center_title(f"Top 10 {top_level} con MTBF bajo"), unsafe_allow_html=True)
+            d = g.dropna(subset=["MTBF_HR"]).sort_values("MTBF_HR", ascending=True).head(10)
+            st.plotly_chart(px.bar(d, x="MTBF_HR", y="ITEM", orientation="h"), width="stretch")
+        with c3:
+            st.markdown(center_title(f"Top 10 {top_level} con Down Time alto"), unsafe_allow_html=True)
+            d = g.sort_values("DT_HR", ascending=False).head(10)
+            st.plotly_chart(px.bar(d, x="DT_HR", y="ITEM", orientation="h"), width="stretch")
