@@ -2,6 +2,7 @@
 import zipfile
 from pathlib import Path
 from typing import Optional, List, Dict
+import re
 
 import numpy as np
 import pandas as pd
@@ -59,13 +60,21 @@ def safe_norm_str_series(s: pd.Series) -> pd.Series:
     return s.astype(str).str.replace(".0", "", regex=False).str.strip()
 
 def infer_tipo_equipo_from_code(x: str) -> Optional[str]:
+    """Inferencia robusta desde código (fallback).
+    Regla:
+      - TRACTOR si contiene 'TRC' en cualquier posición (p.ej. FLMTRC022) o empieza con TR/TRACT
+      - IMPLEMENTO en caso contrario
+    """
     if x is None or (isinstance(x, float) and np.isnan(x)):
         return None
     s = str(x).strip().upper()
-    if s.startswith("TRC"):
+    # Normaliza separadores comunes
+    s = s.replace("-", "").replace(" ", "")
+    if ("TRC" in s) or s.startswith(("TR", "TRACT", "TRACTOR")):
         return "TRACTOR"
+    if ("IMP" in s) or s.startswith(("IM", "IMPLEMENTO")):
+        return "IMPLEMENTO"
     return "IMPLEMENTO"
-
 def _coerce_downtime_to_hr(x: pd.Series) -> pd.Series:
     v = pd.to_numeric(x, errors="coerce")
     if v.notna().any():
@@ -1004,14 +1013,30 @@ else:  # page == "Técnico"
 
     # ---------------------------------------------------------
     # Vista de KPIs también aplica dentro de "Técnico"
-    # - Tractor: solo fallas atribuibles a Tractores
-    # - Implemento: solo fallas atribuibles a Implementos
-    # - Sistema (TRC+IMP): todas las fallas del conjunto filtrado
+    # REGLA CORRECTA (evita errores por prefijos):
+    # - Determinamos TIPO_EQUIPO usando el ID_TURNO -> (ID_TRACTOR, ID_IMPLEMENTO) de TURNOS filtrado (panel).
+    # - Luego aplicamos la vista (Tractor / Implemento / Sistema).
     # ---------------------------------------------------------
-    if "TIPO_EQUIPO" not in fd.columns or fd["TIPO_EQUIPO"].isna().all():
-        fd["TIPO_EQUIPO"] = fd[equipo_col].apply(infer_tipo_equipo_from_code)
-    else:
-        fd["TIPO_EQUIPO"] = fd["TIPO_EQUIPO"].astype(str).str.upper().str.strip()
+    tmap = turnos_sel[["ID_TURNO", "ID_TRACTOR", "ID_IMPLEMENTO"]].copy()
+    tmap["ID_TURNO"] = tmap["ID_TURNO"].astype(str)
+    tmap["ID_TRACTOR"] = tmap["ID_TRACTOR"].astype(str)
+    tmap["ID_IMPLEMENTO"] = tmap["ID_IMPLEMENTO"].astype(str)
+    map_trc = dict(zip(tmap["ID_TURNO"], tmap["ID_TRACTOR"]))
+    map_imp = dict(zip(tmap["ID_TURNO"], tmap["ID_IMPLEMENTO"]))
+
+    def infer_tipo_from_turno_row(r):
+        tid = str(r.get("ID_TURNO", "")).strip()
+        eq = str(r.get(equipo_col, "")).strip()
+        tr = map_trc.get(tid)
+        im = map_imp.get(tid)
+        if tr and eq == str(tr):
+            return "TRACTOR"
+        if im and eq == str(im):
+            return "IMPLEMENTO"
+        # fallback (por si el equipo no coincide exactamente con el tractor/implemento del turno)
+        return infer_tipo_equipo_from_code(eq) or "IMPLEMENTO"
+
+    fd["TIPO_EQUIPO"] = fd.apply(infer_tipo_from_turno_row, axis=1)
 
     if vista_disp == "Tractor":
         fd = fd[fd["TIPO_EQUIPO"] == "TRACTOR"].copy()
@@ -1022,16 +1047,7 @@ else:  # page == "Técnico"
         st.warning("Con los filtros actuales y la vista seleccionada, no hay fallas para mostrar en 'Técnico'.")
         st.stop()
 
-    sistema_col = "SUBUNIDAD" if "SUBUNIDAD" in fd.columns else None
-    subsis_col = find_first_col(fd, ["SUBSISTEMA", "SUB_SISTEMA", "SUB_SIST", "SUBSISTEMA_FALLA"])
-    comp_col = "COMPONENTE" if "COMPONENTE" in fd.columns else None
-    parte_col = "PARTE" if "PARTE" in fd.columns else None
-
-    if sistema_col is None:
-        st.error("No existe SUB_UNIDAD/SUBUNIDAD en FALLAS_DETALLE para usar como Sistema.")
-        st.stop()
-
-    # 1) Cascada
+# 1) Cascada
     st.subheader("1) Filtros jerárquicos (cascada)")
 
     # Base de horómetros según vista (mismo criterio que Dashboard)
@@ -1047,7 +1063,20 @@ else:  # page == "Técnico"
     # Lista de equipos para cascada (respetando filtros globales + vista)
     eq_from_fd = sorted(fd[equipo_col].dropna().astype(str).unique().tolist())
     eq_from_h = sorted(horo_base["ID_EQUIPO"].dropna().astype(str).unique().tolist()) if not horo_base.empty else []
-    eq_all = ["(Todos)"] + sorted(list(set(eq_from_fd + eq_from_h)))
+
+    # Restringir EQUIPOS de cascada a los que realmente están en TURNOS filtrado (panel)
+    if vista_disp == "Tractor":
+        allowed_eq = set(turnos_sel["ID_TRACTOR"].dropna().astype(str).unique().tolist())
+    elif vista_disp == "Implemento":
+        allowed_eq = set(turnos_sel["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist())
+    else:
+        allowed_eq = set(turnos_sel["ID_TRACTOR"].dropna().astype(str).unique().tolist()) | set(
+            turnos_sel["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist()
+        )
+
+    eq_candidates = set(eq_from_fd + eq_from_h)
+    eq_filtered = sorted(list(eq_candidates.intersection(allowed_eq)))
+    eq_all = ["(Todos)"] + eq_filtered
 
     c0a, c0b = st.columns([2, 3])
     with c0a:
