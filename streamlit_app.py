@@ -1002,6 +1002,26 @@ else:  # page == "Técnico"
         st.error("FALLAS_DETALLE no tiene columna de EQUIPO/ID_EQUIPO/ID_EQUIPO_AFECTADO.")
         st.stop()
 
+    # ---------------------------------------------------------
+    # Vista de KPIs también aplica dentro de "Técnico"
+    # - Tractor: solo fallas atribuibles a Tractores
+    # - Implemento: solo fallas atribuibles a Implementos
+    # - Sistema (TRC+IMP): todas las fallas del conjunto filtrado
+    # ---------------------------------------------------------
+    if "TIPO_EQUIPO" not in fd.columns or fd["TIPO_EQUIPO"].isna().all():
+        fd["TIPO_EQUIPO"] = fd[equipo_col].apply(infer_tipo_equipo_from_code)
+    else:
+        fd["TIPO_EQUIPO"] = fd["TIPO_EQUIPO"].astype(str).str.upper().str.strip()
+
+    if vista_disp == "Tractor":
+        fd = fd[fd["TIPO_EQUIPO"] == "TRACTOR"].copy()
+    elif vista_disp == "Implemento":
+        fd = fd[fd["TIPO_EQUIPO"] == "IMPLEMENTO"].copy()
+
+    if fd.empty:
+        st.warning("Con los filtros actuales y la vista seleccionada, no hay fallas para mostrar en 'Técnico'.")
+        st.stop()
+
     sistema_col = "SUBUNIDAD" if "SUBUNIDAD" in fd.columns else None
     subsis_col = find_first_col(fd, ["SUBSISTEMA", "SUB_SISTEMA", "SUB_SIST", "SUBSISTEMA_FALLA"])
     comp_col = "COMPONENTE" if "COMPONENTE" in fd.columns else None
@@ -1014,8 +1034,19 @@ else:  # page == "Técnico"
     # 1) Cascada
     st.subheader("1) Filtros jerárquicos (cascada)")
 
+    # Base de horómetros según vista (mismo criterio que Dashboard)
+    horo_base = horo_sel.copy()
+    if vista_disp == "Tractor":
+        horo_base = horo_base[horo_base["TIPO_EQUIPO"].astype(str).str.upper() == "TRACTOR"].copy()
+    elif vista_disp == "Implemento":
+        horo_base = horo_base[horo_base["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
+    else:
+        # Sistema (TRC+IMP) => TO base por implemento
+        horo_base = horo_base[horo_base["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
+
+    # Lista de equipos para cascada (respetando filtros globales + vista)
     eq_from_fd = sorted(fd[equipo_col].dropna().astype(str).unique().tolist())
-    eq_from_h = sorted(horo_sel["ID_EQUIPO"].dropna().astype(str).unique().tolist()) if not horo_sel.empty else []
+    eq_from_h = sorted(horo_base["ID_EQUIPO"].dropna().astype(str).unique().tolist()) if not horo_base.empty else []
     eq_all = ["(Todos)"] + sorted(list(set(eq_from_fd + eq_from_h)))
 
     c0a, c0b = st.columns([2, 3])
