@@ -46,7 +46,10 @@ def get_openai_client():
     return OpenAI(api_key=key)
 
 def df_to_markdown(df: pd.DataFrame, max_rows: int = 15, max_cols: int = 10) -> str:
-    """Convierte un DataFrame a tabla Markdown (recortada) para contexto del LLM."""
+    """Convierte un DataFrame a texto para contexto del LLM (recortado).
+    - Intenta Markdown (requiere `tabulate`).
+    - Si no está disponible, cae a texto plano.
+    """
     if df is None or df.empty:
         return "(sin filas)"
     d = df.copy()
@@ -54,7 +57,11 @@ def df_to_markdown(df: pd.DataFrame, max_rows: int = 15, max_cols: int = 10) -> 
         d = d.iloc[:, :max_cols]
     if d.shape[0] > max_rows:
         d = d.head(max_rows)
-    return d.to_markdown(index=False)
+    try:
+        return d.to_markdown(index=False)
+    except Exception:
+        # Fallback robusto (sin dependencia tabulate)
+        return d.to_string(index=False)
 
 def build_reliability_context(
     *,
@@ -1268,25 +1275,34 @@ else:  # page == "Técnico"
                         except Exception:
                             model_name = "gpt-4o-mini"
 
-                    from openai import RateLimitError:
-         		try:
-   			   resp = client.responses.create(
-       			       model=model_name,
-       			       input=[
-           		           {"role": "system", "content": instructions},
-            		           {"role": "user", "content": user_prompt},
-        		       ],
-    			   )
-   			   answer = resp.output_text  # o el extractor que ya estés usando
-			except RateLimitError:
-    			   st.error("La API de OpenAI rechazó la solicitud por falta de cuota (billing). Activa Billing o recarga crédito en OpenAI Platform.")
-    			   answer = None
-			except Exception as e:
-    			   st.error(f"Error llamando a OpenAI: {e}")
-    			   answer = None
+                        # Llamada a OpenAI con manejo de errores (cuota/billing)
+                        try:
+                            from openai import RateLimitError
+                        except Exception:
+                            RateLimitError = Exception
 
-			if answer:
-    			   st.write(answer)
+                        try:
+                            resp = client.responses.create(
+                                model=model_name,
+                                input=[
+                                    {"role": "system", "content": instructions + "\n\n" + ctx},
+                                    {"role": "user", "content": user_q},
+                                ],
+                            )
+                            answer = getattr(resp, "output_text", None) or ""
+                        except RateLimitError:
+                            st.error(
+                                "La API de OpenAI rechazó la solicitud por falta de cuota (billing). "
+                                "Activa Billing o recarga crédito en OpenAI Platform."
+                            )
+                            answer = ""
+                        except Exception as e:
+                            st.error(f"Error llamando a OpenAI: {e}")
+                            answer = ""
+
+                    if answer:
+                        st.markdown(answer)
+                        st.session_state.ai_msgs.append({"role": "assistant", "content": answer})
 
     st.divider()
 
