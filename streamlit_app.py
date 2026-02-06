@@ -1,4 +1,5 @@
 # streamlit_app.py
+
 import zipfile
 from pathlib import Path
 from typing import Optional, List, Dict
@@ -9,6 +10,9 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit.components.v1 as components
+import streamlit as st
+
+st.write("🔐 OPENAI_API_KEY cargada:", "OPENAI_API_KEY" in st.secrets)
 
 # =========================================================
 # CONFIG
