@@ -32,33 +32,6 @@ ZIP_NAME = "TPM_modelo_normalizado_CSV.zip"
 DATA_DIR = Path("data_normalizada")
 
 # =========================================================
-# OPENAI CLIENT
-# =========================================================
-def get_openai_client():
-    if OpenAI is None:
-        return None
-    api_key = st.secrets.get("OPENAI_API_KEY")
-    if not api_key:
-        return None
-    return OpenAI(api_key=api_key)
-
-# =========================================================
-# HELPERS IA
-# =========================================================
-def df_to_markdown(df: pd.DataFrame, max_rows=20, max_cols=12) -> str:
-    if df is None or df.empty:
-        return "(sin datos)"
-    d = df.copy()
-    if d.shape[1] > max_cols:
-        d = d.iloc[:, :max_cols]
-    if d.shape[0] > max_rows:
-        d = d.head(max_rows)
-    try:
-        return d.to_markdown(index=False)
-    except Exception:
-        return d.to_string(index=False)
-
-# =========================================================
 # HELPERS
 # =========================================================
 # -------------------------
@@ -321,6 +294,246 @@ Patrón repetitivo: {rep_flag}
 """.strip()
 
     return ctx
+
+
+
+# =========================================================
+# TENDENCIA HISTÓRICA (Nivel 2+)
+# - Resumen mensual de últimos N meses (independiente del rango seleccionado)
+# - Basado en TURNOS + HOROMETROS + FALLAS_DETALLE
+# =========================================================
+def _apply_global_filters_no_date(turnos_all: pd.DataFrame,
+                                 cult_sel: Optional[str],
+                                 turn_sel: Optional[str],
+                                 prop_sel: str,
+                                 fam_sel: str,
+                                 trc_sel: str,
+                                 imp_sel: str,
+                                 id_proceso_sel: Optional[str]) -> pd.DataFrame:
+    """Aplica filtros globales SIN rango de fechas (para tendencia histórica)."""
+    base = turnos_all.copy()
+
+    if cult_sel:
+        base = base[base["CULTIVO"] == cult_sel]
+    if turn_sel:
+        base = base[base["TURNO_NORM"] == turn_sel]
+
+    if prop_sel != "(Todos)":
+        m_prop = False
+        if "TRC_PROPIETARIO" in base.columns:
+            m_prop = m_prop | (base["TRC_PROPIETARIO"].astype(str).str.upper() == str(prop_sel))
+        if "IMP_PROPIETARIO" in base.columns:
+            m_prop = m_prop | (base["IMP_PROPIETARIO"].astype(str).str.upper() == str(prop_sel))
+        base = base[m_prop]
+
+    if fam_sel != "(Todos)":
+        m_fam = False
+        if "TRC_FAMILIA" in base.columns:
+            m_fam = m_fam | (base["TRC_FAMILIA"].astype(str).str.upper() == str(fam_sel))
+        if "IMP_FAMILIA" in base.columns:
+            m_fam = m_fam | (base["IMP_FAMILIA"].astype(str).str.upper() == str(fam_sel))
+        base = base[m_fam]
+
+    if trc_sel != "(Todos)" and "ID_TRACTOR" in base.columns:
+        base = base[base["ID_TRACTOR"].astype(str) == str(trc_sel)]
+    if imp_sel != "(Todos)" and "ID_IMPLEMENTO" in base.columns:
+        base = base[base["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
+
+    if id_proceso_sel is not None and "ID_PROCESO" in base.columns:
+        base = base[base["ID_PROCESO"].astype(str) == str(id_proceso_sel)]
+
+    return base
+
+
+def _build_trend_12m_table(
+    *,
+    turnos_all: pd.DataFrame,
+    horometros_all: pd.DataFrame,
+    fallas_detalle_all: Optional[pd.DataFrame],
+    # filtros globales (sin fecha)
+    cult_sel: Optional[str],
+    turn_sel: Optional[str],
+    prop_sel: str,
+    fam_sel: str,
+    trc_sel: str,
+    imp_sel: str,
+    id_proceso_sel: Optional[str],
+    vista_disp: str,
+    # cascada técnico
+    eq_sel: str,
+    sis_sel: str,
+    com_sel: str,
+    par_sel: str,
+    months_back: int = 12,
+) -> pd.DataFrame:
+    """Construye tabla mensual (últimos N meses) con TO/DT/#Fallas/MTTR/MTBF/Disp.
+    Nota: independiente del rango de fechas del sidebar.
+    """
+    # 1) Turnos históricos base
+    base = _apply_global_filters_no_date(
+        turnos_all, cult_sel, turn_sel, prop_sel, fam_sel, trc_sel, imp_sel, id_proceso_sel
+    )
+    if base.empty:
+        return pd.DataFrame()
+
+    base = base.copy()
+    base["FECHA"] = pd.to_datetime(base["FECHA"], errors="coerce")
+    base = base.dropna(subset=["FECHA"])
+    if base.empty:
+        return pd.DataFrame()
+
+    # Ventana últimos N meses (desde el último dato disponible)
+    end = base["FECHA"].max().normalize()
+    start = (end - pd.DateOffset(months=months_back)).normalize()
+    base = base[(base["FECHA"] >= start) & (base["FECHA"] <= end)].copy()
+    if base.empty:
+        return pd.DataFrame()
+
+    base["MES"] = base["FECHA"].dt.to_period("M").astype(str)
+    ids = set(base["ID_TURNO"].astype(str).tolist())
+
+    # 2) TO mensual (HOROMETROS)
+    h = horometros_all[horometros_all["ID_TURNO"].astype(str).isin(ids)].copy()
+    if h.empty:
+        to_mes = pd.DataFrame({"MES": sorted(base["MES"].unique().tolist()), "TO_HR": 0.0})
+    else:
+        # Vista: igual lógica del Dashboard
+        if vista_disp == "Tractor":
+            h = h[h["TIPO_EQUIPO"].astype(str).str.upper() == "TRACTOR"].copy()
+        elif vista_disp == "Implemento":
+            h = h[h["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
+        else:
+            h = h[h["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
+
+        # Si hay equipo en cascada, TO real del equipo
+        if eq_sel != "(Todos)" and "ID_EQUIPO" in h.columns:
+            h = h[h["ID_EQUIPO"].astype(str).str.upper() == str(eq_sel)].copy()
+
+        turn_mes = base[["ID_TURNO", "MES"]].copy()
+        turn_mes["ID_TURNO"] = turn_mes["ID_TURNO"].astype(str)
+
+        h2 = h.merge(turn_mes, on="ID_TURNO", how="left")
+        to_mes = h2.groupby("MES", dropna=True)["TO_HORO"].sum().reset_index(name="TO_HR")
+
+    # 3) DT y fallas mensual (FALLAS_DETALLE)
+    if fallas_detalle_all is None or fallas_detalle_all.empty:
+        dt_mes = pd.DataFrame({"MES": to_mes["MES"], "DT_HR": 0.0, "FALLAS": 0})
+    else:
+        fd_sel = fallas_detalle_all.copy()
+        if "ID_TURNO" in fd_sel.columns:
+            fd_sel = fd_sel[fd_sel["ID_TURNO"].astype(str).isin(ids)].copy()
+        fd = norm_cols(fd_sel)
+
+        # Asegurar FECHA vía merge con TURNOS
+        turn_mes = base[["ID_TURNO", "MES", "ID_TRACTOR", "ID_IMPLEMENTO"]].copy()
+        turn_mes["ID_TURNO"] = turn_mes["ID_TURNO"].astype(str)
+
+        if "ID_TURNO" not in fd.columns and "ID" in fd.columns:
+            fd["ID_TURNO"] = safe_norm_str_series(fd["ID"])
+
+        # Downtime en horas
+        if "DOWNTIME_HR" not in fd.columns:
+            tf = find_first_col(fd, ["T_FALLA", "TFALLA", "TIEMPO_FALLA", "TIEMPO_DE_FALLA", "DOWNTIME", "DT_HR", "DT_MIN"])
+            if tf is not None:
+                s = pd.to_numeric(fd[tf], errors="coerce")
+                if "MIN" in tf.upper():
+                    fd["DOWNTIME_HR"] = s / 60.0
+                else:
+                    fd["DOWNTIME_HR"] = _coerce_downtime_to_hr(s)
+            else:
+                fd["DOWNTIME_HR"] = 0.0
+        fd["DOWNTIME_HR"] = pd.to_numeric(fd["DOWNTIME_HR"], errors="coerce").fillna(0.0)
+
+        # Alias
+        if "SUBUNIDAD" not in fd.columns and "SUB_UNIDAD" in fd.columns:
+            fd["SUBUNIDAD"] = fd["SUB_UNIDAD"]
+        if "PARTE" not in fd.columns and "PIEZA" in fd.columns:
+            fd["PARTE"] = fd["PIEZA"]
+
+        equipo_col = find_first_col(fd, ["EQUIPO", "ID_EQUIPO", "ID_EQUIPO_AFECTADO"])
+        if equipo_col is None:
+            return pd.DataFrame()
+
+        fd[equipo_col] = fd[equipo_col].astype(str).str.upper().str.strip()
+
+        # Vista (tractor/implemento) usando el universo del periodo histórico
+        trc_ids = set(base["ID_TRACTOR"].dropna().astype(str).str.upper().tolist())
+        imp_ids = set(base["ID_IMPLEMENTO"].dropna().astype(str).str.upper().tolist())
+
+        if vista_disp == "Tractor":
+            fd = fd[fd[equipo_col].isin(trc_ids)].copy()
+        elif vista_disp == "Implemento":
+            fd = fd[fd[equipo_col].isin(imp_ids)].copy()
+        else:
+            fd = fd[fd[equipo_col].isin(trc_ids.union(imp_ids))].copy()
+
+        # Cascada (equipo/sis/com/parte)
+        if eq_sel != "(Todos)":
+            fd = fd[fd[equipo_col].astype(str).str.upper() == str(eq_sel)].copy()
+        if sis_sel != "(Todos)" and "SUBUNIDAD" in fd.columns:
+            fd = fd[fd["SUBUNIDAD"].astype(str) == str(sis_sel)].copy()
+        if com_sel != "(Todos)" and "COMPONENTE" in fd.columns:
+            fd = fd[fd["COMPONENTE"].astype(str) == str(com_sel)].copy()
+        if par_sel != "(Todos)" and "PARTE" in fd.columns:
+            fd = fd[fd["PARTE"].astype(str) == str(par_sel)].copy()
+
+        fd2 = fd.merge(turn_mes[["ID_TURNO", "MES"]], on="ID_TURNO", how="left")
+
+        dt_mes = fd2.groupby("MES", dropna=True).agg(
+            DT_HR=("DOWNTIME_HR", "sum"),
+            FALLAS=("DOWNTIME_HR", "size")
+        ).reset_index()
+
+    # 4) KPI mensual
+    evo = to_mes.merge(dt_mes, on="MES", how="left").fillna({"DT_HR": 0.0, "FALLAS": 0})
+    evo["FALLAS"] = evo["FALLAS"].astype(int)
+    evo["MTTR_HR"] = np.where(evo["FALLAS"] > 0, evo["DT_HR"] / evo["FALLAS"], np.nan)
+    evo["MTBF_HR"] = np.where(evo["FALLAS"] > 0, evo["TO_HR"] / evo["FALLAS"], np.nan)
+    evo["DISP"] = np.where((evo["TO_HR"] + evo["DT_HR"]) > 0, evo["TO_HR"] / (evo["TO_HR"] + evo["DT_HR"]), np.nan)
+
+    # Orden cronológico
+    evo["_MES_ORD"] = pd.to_datetime(evo["MES"] + "-01", errors="coerce")
+    evo = evo.sort_values("_MES_ORD").drop(columns=["_MES_ORD"])
+
+    return evo
+
+
+def summarize_trend_signals(evo: pd.DataFrame, last_n: int = 6) -> str:
+    """Señales simples de tendencia (barato en tokens)."""
+    if evo is None or evo.empty:
+        return "(sin histórico suficiente)"
+
+    d = evo.tail(last_n).copy()
+
+    def _slope(series: pd.Series):
+        series = pd.to_numeric(series, errors="coerce").dropna()
+        if len(series) < 3:
+            return None
+        x = np.arange(len(series))
+        m = np.polyfit(x, series.values, 1)[0]
+        return float(m)
+
+    s_mtbf = _slope(d["MTBF_HR"]) if "MTBF_HR" in d.columns else None
+    s_mttr = _slope(d["MTTR_HR"]) if "MTTR_HR" in d.columns else None
+    s_dt = _slope(d["DT_HR"]) if "DT_HR" in d.columns else None
+
+    def _arrow(m, good_when_up=True):
+        if m is None:
+            return "N/A"
+        if abs(m) < 1e-9:
+            return "→"
+        up = m > 0
+        if good_when_up:
+            return "↑" if up else "↓"
+        else:
+            return "↑" if up else "↓"
+
+    return (
+        f"Señales (últimos {last_n} meses): "
+        f"MTBF {_arrow(s_mtbf, True)} | "
+        f"MTTR {_arrow(s_mttr, False)} | "
+        f"Downtime {_arrow(s_dt, False)}"
+    )
 
 def ensure_data_unzipped():
     if DATA_DIR.exists():
@@ -1451,97 +1664,36 @@ else:  # page == "Técnico"
 }
 
                 # -----------------------------
-                # PERIODO ANTERIOR (automático)
-                # - mismo tamaño de ventana que el rango actual
-                # - termina el día anterior a la fecha de inicio actual
+                # TENDENCIA HISTÓRICA (automática)
+                # - últimos 12 meses por mes
+                # - independiente del rango de fechas seleccionado
                 # -----------------------------
-                df_prev_kpi = None
-                try:
-                    if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
-                        d1 = pd.to_datetime(date_range[0])
-                        d2 = pd.to_datetime(date_range[1])
-                        win_days = int((d2 - d1).days) + 1
-                        prev_end = d1 - pd.Timedelta(days=1)
-                        prev_start = prev_end - pd.Timedelta(days=win_days - 1)
-
-                        # Turnos del periodo anterior con los mismos filtros globales
-                        df_prev_tmp = turnos.copy()
-                        df_prev_tmp = df_prev_tmp[(df_prev_tmp["FECHA"] >= prev_start) & (df_prev_tmp["FECHA"] <= prev_end)]
-
-                        if cult_sel:
-                            df_prev_tmp = df_prev_tmp[df_prev_tmp["CULTIVO"] == cult_sel]
-                        if turn_sel:
-                            df_prev_tmp = df_prev_tmp[df_prev_tmp["TURNO_NORM"] == turn_sel]
-
-                        if prop_sel != "(Todos)":
-                            m_prop = False
-                            if "TRC_PROPIETARIO" in df_prev_tmp.columns:
-                                m_prop = m_prop | (df_prev_tmp["TRC_PROPIETARIO"].astype(str).str.upper() == str(prop_sel))
-                            if "IMP_PROPIETARIO" in df_prev_tmp.columns:
-                                m_prop = m_prop | (df_prev_tmp["IMP_PROPIETARIO"].astype(str).str.upper() == str(prop_sel))
-                            df_prev_tmp = df_prev_tmp[m_prop]
-
-                        if fam_sel != "(Todos)":
-                            m_fam = False
-                            if "TRC_FAMILIA" in df_prev_tmp.columns:
-                                m_fam = m_fam | (df_prev_tmp["TRC_FAMILIA"].astype(str).str.upper() == str(fam_sel))
-                            if "IMP_FAMILIA" in df_prev_tmp.columns:
-                                m_fam = m_fam | (df_prev_tmp["IMP_FAMILIA"].astype(str).str.upper() == str(fam_sel))
-                            df_prev_tmp = df_prev_tmp[m_fam]
-
-                        if trc_sel != "(Todos)" and "ID_TRACTOR" in df_prev_tmp.columns:
-                            df_prev_tmp = df_prev_tmp[df_prev_tmp["ID_TRACTOR"].astype(str) == str(trc_sel)]
-                        if imp_sel != "(Todos)" and "ID_IMPLEMENTO" in df_prev_tmp.columns:
-                            df_prev_tmp = df_prev_tmp[df_prev_tmp["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
-
-                        if id_proceso_sel is not None and "ID_PROCESO" in df_prev_tmp.columns:
-                            df_prev_tmp = df_prev_tmp[df_prev_tmp["ID_PROCESO"].astype(str) == str(id_proceso_sel)]
-
-                        ids_prev = set(df_prev_tmp["ID_TURNO"].astype(str).tolist())
-
-                        # TO del periodo anterior (horómetros)
-                        horo_prev = horometros[horometros["ID_TURNO"].astype(str).isin(ids_prev)].copy()
-                        prev_to = float(horo_prev["TO_HORO"].sum()) if "TO_HORO" in horo_prev.columns else None
-
-                        # Downtime y fallas del periodo anterior (fallas detalle)
-                        prev_dt = None
-                        prev_nf = None
-                        if fallas_detalle is not None and len(ids_prev) > 0:
-                            if "ID_TURNO" in fallas_detalle.columns:
-                                fd_prev_sel = fallas_detalle[fallas_detalle["ID_TURNO"].astype(str).isin(ids_prev)].copy()
-                            else:
-                                fd_prev_sel = fallas_detalle.copy()
-
-                            fd_prev = norm_cols(fd_prev_sel.copy())
-
-                            # Downtime normalizado a horas
-                            if "DOWNTIME_HR" not in fd_prev.columns:
-                                tf = find_first_col(fd_prev, ["T_FALLA", "TFALLA", "TIEMPO_FALLA", "TIEMPO_DE_FALLA", "DOWNTIME", "DT_HR", "DT_MIN"])
-                                if tf is not None:
-                                    s = pd.to_numeric(fd_prev[tf], errors="coerce")
-                                    if "MIN" in tf.upper():
-                                        fd_prev["DOWNTIME_HR"] = s / 60.0
-                                    else:
-                                        fd_prev["DOWNTIME_HR"] = s
-
-                            prev_dt = float(pd.to_numeric(fd_prev.get("DOWNTIME_HR", 0), errors="coerce").fillna(0).sum())
-                            prev_nf = int(len(fd_prev))
-
-                        # df_prev_kpi (1 fila) para que build_ctx_nivel2 calcule tendencia
-                        if prev_to is not None or prev_dt is not None or prev_nf is not None:
-                            df_prev_kpi = pd.DataFrame([{
-                                "TO_HR": prev_to,
-                                "DOWNTIME_HR": prev_dt,
-                                "FALLAS": prev_nf
-                            }])
-                except Exception:
-                    df_prev_kpi = None
+                evo_hist = _build_trend_12m_table(
+                    turnos_all=turnos,
+                    horometros_all=horometros,
+                    fallas_detalle_all=fallas_detalle,
+                    cult_sel=cult_sel,
+                    turn_sel=turn_sel,
+                    prop_sel=prop_sel,
+                    fam_sel=fam_sel,
+                    trc_sel=trc_sel,
+                    imp_sel=imp_sel,
+                    id_proceso_sel=id_proceso_sel,
+                    vista_disp=vista_disp,
+                    eq_sel=eq_sel,
+                    sis_sel=sis_sel,
+                    com_sel=com_sel,
+                    par_sel=par_sel,
+                    months_back=12,
+                )
+                trend_signal = summarize_trend_signals(evo_hist, last_n=6)
 
                 ctx = build_ctx_nivel2(
+
                     filtros=filtros_activos,
                     kpis=kpis,
                     df_events=df_lvl,
-                    df_prev=df_prev_kpi,  # periodo anterior automático
+                    df_prev=None,
                     col_dt="DOWNTIME_HR",
                     col_to="TO_HR",
                     col_comp="COMPONENTE",
@@ -1550,7 +1702,18 @@ else:  # page == "Técnico"
                     col_verbo="VERBO_TECNICO",
                     col_causa="CAUSA_FALLA",
                     col_equipo="ID_EQUIPO",
+
                 )
+
+                # Añadir tendencia histórica al contexto (tabla compacta)
+                if evo_hist is not None and not evo_hist.empty:
+                    ctx += "\n\n=== TENDENCIA HISTÓRICA (últimos 12 meses, independiente del rango) ===\n"
+                    ctx += trend_signal + "\n\n"
+                    cols_tr = [c for c in ["MES","TO_HR","DT_HR","FALLAS","MTTR_HR","MTBF_HR","DISP"] if c in evo_hist.columns]
+                    ctx += df_to_markdown(evo_hist[cols_tr], max_rows=12, max_cols=7)
+                else:
+                    ctx += "\n\n=== TENDENCIA HISTÓRICA ===\n(sin histórico suficiente con los filtros actuales)\n"
+
 
                 instructions = (
                     "Eres un asistente senior de confiabilidad (RCM II / TPM) para una flota agrícola. "
