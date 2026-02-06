@@ -1268,18 +1268,26 @@ else:  # page == "Técnico"
                         except Exception:
                             model_name = "gpt-4o-mini"
 
-                        resp = client.responses.create(
-                            model=model_name,
-                            input=[
-                                {"role": "system", "content": instructions},
-                                {"role": "user", "content": ctx + "\n\nPregunta del usuario: " + user_q},
-                            ],
-                        )
-                        ans = getattr(resp, "output_text", None) or "(No recibí texto de respuesta)"
-                        st.markdown(ans)
-                st.session_state.ai_msgs.append({"role": "assistant", "content": ans})
+                      from openai import RateLimitError
 
-    st.divider()
+			try:
+   			   resp = client.responses.create(
+       			       model=model_name,
+       			       input=[
+           		           {"role": "system", "content": instructions},
+            		           {"role": "user", "content": user_prompt},
+        		       ],
+    			   )
+   			   answer = resp.output_text  # o el extractor que ya estés usando
+			except RateLimitError:
+    			   st.error("La API de OpenAI rechazó la solicitud por falta de cuota (billing). Activa Billing o recarga crédito en OpenAI Platform.")
+    			   answer = None
+			except Exception as e:
+    			   st.error(f"Error llamando a OpenAI: {e}")
+    			   answer = None
+
+			if answer:
+    			   st.write(answer)
 
     st.divider()
 
