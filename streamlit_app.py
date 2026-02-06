@@ -1041,7 +1041,7 @@ else:  # page == "Técnico"
     c1, c2, c3 = st.columns(3)
     with c1:
         sis_sel, df_lvl = casc_select("Sub unidad", sistema_col, df_lvl, "tec_sis", disabled=False)
-     with c2:
+    with c2:
         com_sel, df_lvl = casc_select("Componente", comp_col, df_lvl, "tec_com", disabled=(comp_col is None))
     with c3:
         par_sel, df_lvl = casc_select("Parte", parte_col, df_lvl, "tec_par", disabled=(parte_col is None))
