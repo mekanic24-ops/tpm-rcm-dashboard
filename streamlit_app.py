@@ -12,7 +12,11 @@ import plotly.graph_objects as go
 import streamlit.components.v1 as components
 import streamlit as st
 
-st.write("🔐 OPENAI_API_KEY cargada:", "OPENAI_API_KEY" in st.secrets)
+# OpenAI (para Asistente de Confiabilidad)
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
 
 # =========================================================
 # CONFIG
@@ -25,6 +29,93 @@ DATA_DIR = Path("data_normalizada")
 # =========================================================
 # HELPERS
 # =========================================================
+# -------------------------
+# IA: Asistente de Confiabilidad
+# -------------------------
+def get_openai_client():
+    """Crea el cliente OpenAI usando Streamlit secrets."""
+    if OpenAI is None:
+        return None
+    key = None
+    try:
+        key = st.secrets.get("OPENAI_API_KEY", None)
+    except Exception:
+        key = None
+    if not key:
+        return None
+    return OpenAI(api_key=key)
+
+def df_to_markdown(df: pd.DataFrame, max_rows: int = 15, max_cols: int = 10) -> str:
+    """Convierte un DataFrame a tabla Markdown (recortada) para contexto del LLM."""
+    if df is None or df.empty:
+        return "(sin filas)"
+    d = df.copy()
+    if d.shape[1] > max_cols:
+        d = d.iloc[:, :max_cols]
+    if d.shape[0] > max_rows:
+        d = d.head(max_rows)
+    return d.to_markdown(index=False)
+
+def build_reliability_context(
+    *,
+    vista_disp: str,
+    date_range,
+    cult_choice: str,
+    turn_choice: str,
+    prop_sel: str,
+    fam_sel: str,
+    trc_sel: str,
+    imp_sel: str,
+    proc_name_sel: str,
+    eq_sel: str,
+    sis_sel: str,
+    com_sel: str,
+    par_sel: str,
+    kpis: dict,
+    df_lvl: pd.DataFrame,
+    top_tables: dict,
+) -> str:
+    """Arma el contexto (texto) que se enviará al asistente."""
+    filtros = {
+        "vista_kpis": vista_disp,
+        "fechas": str(date_range),
+        "cultivo": cult_choice,
+        "turno": turn_choice,
+        "propietario": prop_sel,
+        "familia": fam_sel,
+        "tractor": trc_sel,
+        "implemento": imp_sel,
+        "proceso": proc_name_sel,
+        "cascada_equipo": eq_sel,
+        "cascada_subunidad": sis_sel,
+        "cascada_componente": com_sel,
+        "cascada_parte": par_sel,
+    }
+
+    prefer = [
+        "EQUIPO", "ID_EQUIPO", "ID_EQUIPO_AFECTADO",
+        "SUBUNIDAD", "SUB_UNIDAD", "COMPONENTE", "PARTE", "PIEZA",
+        "DOWNTIME_HR", "VERBO_TECNICO", "CAUSA_FALLA",
+    ]
+    cols = [c for c in prefer if c in df_lvl.columns]
+    df_view = df_lvl[cols].copy() if cols else df_lvl.copy()
+
+    ctx = f"""Eres un **Asistente de Confiabilidad y Mantenimiento** (RCM/TPM). 
+Responde SIEMPRE en español, con formato claro y accionable para taller/campo.
+
+## 1) Filtros activos
+{filtros}
+
+## 2) KPIs calculados (ya filtrados)
+{kpis}
+
+## 3) Muestra de fallas (FALLAS_DETALLE) filtradas (primeras filas)
+{df_to_markdown(df_view, max_rows=20, max_cols=12)}
+
+## 4) Top 10 (ya calculados)
+{top_tables}
+"""
+    return ctx
 def ensure_data_unzipped():
     if DATA_DIR.exists():
         return
@@ -1056,6 +1147,140 @@ else:  # page == "Técnico"
     ]
     render_kpi_row(cards, height=205)
 
+    # ---------------------------------
+    # 2B) Asistente de Confiabilidad (IA) — usa filtros + DF ya filtrados
+    # ---------------------------------
+    st.subheader("🧠 Asistente de Confiabilidad (IA)")
+    st.caption("Haz preguntas sobre MTTR/MTBF/Disponibilidad y te devolverá recomendaciones accionables basadas en los datos filtrados.")
+
+    client = get_openai_client()
+    if client is None:
+        st.info("Para activar el asistente, configura **OPENAI_API_KEY** en *Streamlit Cloud → App settings → Secrets*.")
+    else:
+        # Preparar Top 10 rápidos para contexto (sobre el nivel más detallado disponible)
+        top_level = comp_col if (comp_col and comp_col in df_lvl.columns) else parte_col
+        top_tables = {}
+        if top_level is not None and top_level in df_lvl.columns and not df_lvl.empty:
+            g_ai = df_lvl.groupby(top_level, dropna=True).agg(
+                FALLAS=("DOWNTIME_HR", "size"),
+                DT_HR=("DOWNTIME_HR", "sum")
+            ).reset_index().rename(columns={top_level: "ITEM"})
+            g_ai["ITEM"] = g_ai["ITEM"].astype(str)
+            g_ai["MTTR_HR"] = np.where(g_ai["FALLAS"] > 0, g_ai["DT_HR"] / g_ai["FALLAS"], np.nan)
+            g_ai["MTBF_HR"] = np.where(g_ai["FALLAS"] > 0, to_real / g_ai["FALLAS"], np.nan)
+
+            top_tables = {
+                "top_level": top_level,
+                "top_mttr": g_ai.dropna(subset=["MTTR_HR"]).sort_values("MTTR_HR", ascending=False).head(10)[["ITEM","FALLAS","DT_HR","MTTR_HR"]],
+                "top_mtbf": g_ai.dropna(subset=["MTBF_HR"]).sort_values("MTBF_HR", ascending=True).head(10)[["ITEM","FALLAS","DT_HR","MTBF_HR"]],
+                "top_dt": g_ai.sort_values("DT_HR", ascending=False).head(10)[["ITEM","FALLAS","DT_HR"]],
+            }
+
+        left, right = st.columns([2, 1], gap="large")
+
+        with right:
+            st.markdown("#### Contexto usado por el asistente")
+            st.write("**KPIs filtrados**")
+            st.json({
+                "TO_real_h": float(to_real),
+                "DT_h": float(dt_hr),
+                "fallas": int(n_fallas),
+                "MTTR_h_falla": None if pd.isna(mttr) else float(mttr),
+                "MTBF_h_falla": None if pd.isna(mtbf) else float(mtbf),
+                "Disponibilidad": None if pd.isna(disp_tec) else float(disp_tec),
+                "Vista": vista_disp,
+            }, expanded=False)
+
+            st.write("**Muestra de fallas filtradas**")
+            st.dataframe(df_lvl.head(30), use_container_width=True, height=260)
+
+            if isinstance(top_tables, dict) and top_tables.get("top_level"):
+                st.write(f"**Top 10 (nivel: {top_tables['top_level']})**")
+                st.dataframe(top_tables["top_mttr"], use_container_width=True, height=220)
+
+            if st.button("🧹 Limpiar chat", key="ai_clear"):
+                st.session_state.pop("ai_msgs", None)
+                st.rerun()
+
+        with left:
+            if "ai_msgs" not in st.session_state:
+                st.session_state.ai_msgs = [
+                    {"role": "assistant", "content": "Hola. Soy tu **Asistente de Confiabilidad**. Pregúntame, por ejemplo: *¿Qué debo atacar primero para subir disponibilidad?*"}
+                ]
+
+            for m in st.session_state.ai_msgs:
+                with st.chat_message(m["role"]):
+                    st.markdown(m["content"])
+
+            user_q = st.chat_input("Escribe tu consulta (usa los filtros actuales)…", key="ai_input")
+            if user_q:
+                st.session_state.ai_msgs.append({"role": "user", "content": user_q})
+                with st.chat_message("user"):
+                    st.markdown(user_q)
+
+                kpis = {
+                    "TO_real_h": float(to_real),
+                    "DT_h": float(dt_hr),
+                    "fallas": int(n_fallas),
+                    "MTTR_h_falla": None if pd.isna(mttr) else float(mttr),
+                    "MTBF_h_falla": None if pd.isna(mtbf) else float(mtbf),
+                    "Disponibilidad": None if pd.isna(disp_tec) else float(disp_tec),
+                }
+                top_tables_text = {}
+                if isinstance(top_tables, dict) and top_tables.get("top_level"):
+                    top_tables_text = {
+                        "top_level": top_tables["top_level"],
+                        "top_mttr": top_tables["top_mttr"].to_dict(orient="records"),
+                        "top_mtbf": top_tables["top_mtbf"].to_dict(orient="records"),
+                        "top_dt": top_tables["top_dt"].to_dict(orient="records"),
+                    }
+
+                ctx = build_reliability_context(
+                    vista_disp=vista_disp,
+                    date_range=date_range,
+                    cult_choice=cult_choice,
+                    turn_choice=turn_choice,
+                    prop_sel=prop_sel,
+                    fam_sel=fam_sel,
+                    trc_sel=trc_sel,
+                    imp_sel=imp_sel,
+                    proc_name_sel=proc_name_sel,
+                    eq_sel=eq_sel,
+                    sis_sel=sis_sel if "sis_sel" in locals() else "(N/A)",
+                    com_sel=com_sel if "com_sel" in locals() else "(N/A)",
+                    par_sel=par_sel if "par_sel" in locals() else "(N/A)",
+                    kpis=kpis,
+                    df_lvl=df_lvl,
+                    top_tables=top_tables_text,
+                )
+
+                instructions = (
+                    "Eres un asistente senior de confiabilidad (RCM II / TPM) para una flota agrícola. "
+                    "Usa SOLO el contexto provisto (KPIs y tablas) para sustentar tus conclusiones. "
+                    "Entrega: (1) diagnóstico breve, (2) 3-7 acciones priorizadas, (3) hipótesis de causa raíz, "
+                    "(4) qué datos faltan para confirmar, y (5) qué preventivos/predictivos sugerir."
+                )
+
+                with st.chat_message("assistant"):
+                    with st.spinner("Pensando…"):
+                        try:
+                            model_name = st.secrets.get("OPENAI_MODEL", "gpt-4o-mini")
+                        except Exception:
+                            model_name = "gpt-4o-mini"
+
+                        resp = client.responses.create(
+                            model=model_name,
+                            input=[
+                                {"role": "system", "content": instructions},
+                                {"role": "user", "content": ctx + "\n\nPregunta del usuario: " + user_q},
+                            ],
+                        )
+                        ans = getattr(resp, "output_text", None) or "(No recibí texto de respuesta)"
+                        st.markdown(ans)
+                st.session_state.ai_msgs.append({"role": "assistant", "content": ans})
+
+    st.divider()
+
     st.divider()
 
     # ---------------------------------
@@ -1077,16 +1302,25 @@ else:  # page == "Técnico"
 
     top_barras = st.slider("Top por gráfico", min_value=5, max_value=30, value=15, step=1, key="tec_top_barras")
 
-    bc1, bc2, bc3 = st.columns(3)
+   bc1, bc2, bc3 = st.columns(3)
     with bc1:
         fig = bar_fallas(df_lvl, sistema_col, "Fallas por Sub unidad", top=top_barras)
-        st.plotly_chart(fig, use_container_width=True) if fig else st.info("Sin datos para Sub unidad.")
+        if fig is not None:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Sin datos para Sub unidad.")
     with bc2:
         fig = bar_fallas(df_lvl, comp_col, "Fallas por Componente", top=top_barras)
-        st.plotly_chart(fig, use_container_width=True) if fig else st.info("Sin datos para Componente.")
+        if fig is not None:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Sin datos para Componente.")
     with bc3:
         fig = bar_fallas(df_lvl, parte_col, "Fallas por Parte", top=top_barras)
-        st.plotly_chart(fig, use_container_width=True) if fig else st.info("Sin datos para Parte.")
+        if fig is not None:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Sin datos para Parte.")
 
     st.divider()
 
