@@ -650,6 +650,31 @@ if page == "Dashboard":
         base = base[base["CULTIVO"] == cult_sel]
     if turn_sel:
         base = base[base["TURNO_NORM"] == turn_sel]
+
+    # Propietario / Familia (EQUIPOS.csv) — aplica según vista
+    if owner_sel != "(Todos)":
+        if vista_disp == "Tractor":
+            if "TRC_PROPIETARIO2" in base.columns:
+                base = base[base["TRC_PROPIETARIO2"] == owner_sel]
+        elif vista_disp == "Implemento":
+            if "IMP_PROPIETARIO2" in base.columns:
+                base = base[base["IMP_PROPIETARIO2"] == owner_sel]
+        else:
+            m1 = base["TRC_PROPIETARIO2"] == owner_sel if "TRC_PROPIETARIO2" in base.columns else pd.Series(False, index=base.index)
+            m2 = base["IMP_PROPIETARIO2"] == owner_sel if "IMP_PROPIETARIO2" in base.columns else pd.Series(False, index=base.index)
+            base = base[m1 | m2]
+
+    if fam_sel != "(Todos)":
+        if vista_disp == "Tractor":
+            if "TRC_FAMILIA" in base.columns:
+                base = base[base["TRC_FAMILIA"] == fam_sel]
+        elif vista_disp == "Implemento":
+            if "IMP_FAMILIA" in base.columns:
+                base = base[base["IMP_FAMILIA"] == fam_sel]
+        else:
+            m1 = base["TRC_FAMILIA"] == fam_sel if "TRC_FAMILIA" in base.columns else pd.Series(False, index=base.index)
+            m2 = base["IMP_FAMILIA"] == fam_sel if "IMP_FAMILIA" in base.columns else pd.Series(False, index=base.index)
+            base = base[m1 | m2]
     if trc_sel != "(Todos)":
         base = base[base["ID_TRACTOR"].astype(str) == str(trc_sel)]
     if imp_sel != "(Todos)":
@@ -997,7 +1022,7 @@ else:  # page == "Técnico"
     with c0a:
         eq_sel = st.selectbox("Equipo", eq_all, index=0, key="tec_eq")
     with c0b:
-        st.caption("Cascada: Equipo → Sistema(SUB UNIDAD) → Sub sistema → Componente → Parte")
+        st.caption("Cascada: Equipo → Sub unidad → Componente → Parte")
 
     df_lvl = fd.copy()
     if eq_sel != "(Todos)":
@@ -1013,14 +1038,12 @@ else:  # page == "Técnico"
             df_in = df_in[df_in[colname].astype(str) == str(val)].copy()
         return val, df_in
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3 = st.columns(3)
     with c1:
-        sis_sel, df_lvl = casc_select("Sistema (SUB UNIDAD)", sistema_col, df_lvl, "tec_sis", disabled=False)
+        sis_sel, df_lvl = casc_select("Sub unidad", sistema_col, df_lvl, "tec_sis", disabled=False)
     with c2:
-        sub_sel, df_lvl = casc_select("Sub sistema", subsis_col, df_lvl, "tec_sub", disabled=(subsis_col is None))
-    with c3:
         com_sel, df_lvl = casc_select("Componente", comp_col, df_lvl, "tec_com", disabled=(comp_col is None))
-    with c4:
+    with c3:
         par_sel, df_lvl = casc_select("Parte", parte_col, df_lvl, "tec_par", disabled=(parte_col is None))
 
     st.divider()
