@@ -20,8 +20,7 @@ DATA_DIR = Path("data_normalizada")
 EQUIPOS_CSV_NAME = "EQUIPOS.csv"
 
 # Catálogo de equipos (opcional, para filtros por Propietario/Familia)
-EQUIPOS_XLSX = "TPM OPERACIONES AGRICOLAS Jimmy AcuñaV7 (7).xlsx"
-EQUIPOS_SHEET = "EQUIPOS"
+EQUIPOS_CSV_NAME = "EQUIPOS.csv"
 
 
 # =========================================================
@@ -77,46 +76,32 @@ def _coerce_downtime_to_hr(x: pd.Series) -> pd.Series:
     return v
 
 
-def load_equipos_catalog() -> Optional[pd.DataFrame]:
-    """Carga la hoja EQUIPOS desde un Excel si existe (para Propietario/Familia)."""
-    xlsx_path = Path(EQUIPOS_XLSX)
-    if not xlsx_path.exists():
-        return None
-    try:
-        eq = pd.read_excel(xlsx_path, sheet_name=EQUIPOS_SHEET)
-    except Exception as ex:
-        st.warning(f"No pude leer {EQUIPOS_XLSX} / hoja {EQUIPOS_SHEET}: {ex}")
-        return None
+def load_equipos_catalog() -> pd.DataFrame:
+    """
+    Carga catálogo de equipos desde data_normalizada/EQUIPOS.csv (dentro del ZIP).
+    Debe contener al menos: código de equipo (EQUIPOS/EQUIPO/ID_EQUIPO), PROPIETARIO2 y FAMILIA.
+    """
+    p = DATA_DIR / EQUIPOS_CSV_NAME
+    if not p.exists():
+        # Catálogo opcional: si no existe, devolvemos vacío y el dashboard funciona igual.
+        return pd.DataFrame()
+    df = pd.read_csv(p, encoding="utf-8-sig", low_memory=False)
+    df = norm_cols(df)
 
-    eq = norm_cols(eq)
-    # Columnas esperadas (según tu archivo): EQUIPOS, PROPIETARIO2, FAMILIA
-    col_id = find_first_col(eq, ["EQUIPOS", "ID_EQUIPO", "EQUIPO", "COD_EQUIPO", "CODIGO"])
-    if col_id is None:
-        st.warning("En hoja EQUIPOS no encontré columna de ID (EQUIPOS/ID_EQUIPO/EQUIPO). Se omiten filtros Propietario/Familia.")
-        return None
-
-    eq[col_id] = safe_norm_str_series(eq[col_id]).str.upper()
-
-    # Propietario: prioriza PROPIETARIO2 (AGK/ALQUILADO). Si no existe, intenta PROPIETARIO.
-    col_prop = find_first_col(eq, ["PROPIETARIO2", "PROPIETARIO", "OWNER", "PROPIEDAD"])
-    if col_prop is not None:
-        eq[col_prop] = eq[col_prop].astype(str).str.strip().str.upper()
-        eq[col_prop] = eq[col_prop].replace({"PROPIO": "AGK", "AGROKASA": "AGK"})
+    # Normalizar posibles nombres de columna para código de equipo
+    code_col = find_first_col(df, ["EQUIPOS", "EQUIPO", "ID_EQUIPO", "COD_EQUIPO", "CODIGO", "CODIGO_EQUIPO"])
+    if code_col and code_col != "EQUIPO_CODE":
+        df["EQUIPO_CODE"] = safe_norm_str_series(df[code_col]).str.upper()
     else:
-        eq["PROPIETARIO2"] = np.nan
-        col_prop = "PROPIETARIO2"
+        df["EQUIPO_CODE"] = pd.Series(dtype=str)
 
-    col_fam = find_first_col(eq, ["FAMILIA", "FAMILY"])
-    if col_fam is not None:
-        eq[col_fam] = eq[col_fam].astype(str).str.strip().str.upper()
-    else:
-        eq["FAMILIA"] = np.nan
-        col_fam = "FAMILIA"
+    # Normalizar propietario/familia
+    if "PROPIETARIO2" in df.columns:
+        df["PROPIETARIO2"] = df["PROPIETARIO2"].astype(str).str.upper().str.strip()
+    if "FAMILIA" in df.columns:
+        df["FAMILIA"] = df["FAMILIA"].astype(str).str.upper().str.strip()
 
-    out = eq[[col_id, col_prop, col_fam]].rename(columns={col_id: "ID_EQUIPO", col_prop: "PROPIETARIO2", col_fam: "FAMILIA"})
-    out = out.dropna(subset=["ID_EQUIPO"]).drop_duplicates(subset=["ID_EQUIPO"])
-    return out
-
+    return df
 
 @st.cache_data(show_spinner=False)
 def load_tables() -> dict:
@@ -137,7 +122,7 @@ def load_tables() -> dict:
     fallas_cat = r("FALLAS_CATALOGO.csv")
     cat_proceso = r("CAT_PROCESO.csv")
 
-    equipos = load_equipos_catalog()
+    equipos_cat = load_equipos_catalog()
 
     fallas_detalle = None
     p_det = DATA_DIR / "FALLAS_DETALLE_NORMALIZADO.csv"
@@ -232,7 +217,6 @@ def load_tables() -> dict:
         "fallas_cat": fallas_cat,
         "cat_proceso": cat_proceso,
         "fallas_detalle": fallas_detalle,
-        "equipos": equipos,
         "equipos_cat": equipos_cat,
     }
 
@@ -258,72 +242,58 @@ def normalize_turno(x) -> Optional[str]:
         return "NOCHE"
     return s
 
-def build_enriched_turnos(turnos, operadores, lotes, equipos_cat: Optional[pd.DataFrame] = None):
+def build_enriched_turnos(turnos: pd.DataFrame, operadores: pd.DataFrame, lotes: pd.DataFrame, equipos_cat: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    """
+    Enriquecer TURNOS con:
+    - OPERADOR_NOMBRE (desde OPERADORES)
+    - CULTIVO y TURNO_NORM (desde LOTES y normalización)
+    - Catálogo de equipos (opcional): PROPIETARIO2 y FAMILIA para tractor e implemento.
+      Columnas resultantes:
+        TRC_PROPIETARIO2, TRC_FAMILIA, IMP_PROPIETARIO2, IMP_FAMILIA
+    """
     t = turnos.copy()
-    op_map = dict(zip(operadores["ID_OPERADOR"], operadores["NOMBRE_OPERADOR"]))
-    t["OPERADOR_NOMBRE"] = t["ID_OPERADOR"].map(op_map)
 
-    lote_map = dict(zip(lotes["ID_LOTE"], lotes["CULTIVO"]))
-    t["CULTIVO"] = t["ID_LOTE"].map(lote_map)
-    t["CULTIVO"] = t["CULTIVO"].apply(normalize_cultivo)
+    # Operador
+    if "ID_OPERADOR" in t.columns and "ID_OPERADOR" in operadores.columns:
+        op_map = dict(zip(operadores["ID_OPERADOR"], operadores["NOMBRE_OPERADOR"]))
+        t["OPERADOR_NOMBRE"] = t["ID_OPERADOR"].map(op_map)
+    else:
+        t["OPERADOR_NOMBRE"] = None
 
+    # Cultivo
+    if "ID_LOTE" in t.columns and "ID_LOTE" in lotes.columns:
+        lote_map = dict(zip(lotes["ID_LOTE"], lotes["CULTIVO"]))
+        t["CULTIVO"] = t["ID_LOTE"].map(lote_map)
+        t["CULTIVO"] = t["CULTIVO"].apply(normalize_cultivo)
+    else:
+        t["CULTIVO"] = None
 
-    # =========================
-    # Enriquecer con EQUIPOS: PROPIETARIO2 y FAMILIA (Tractor / Implemento)
-    # =========================
-    if equipos is not None and not equipos.empty and "EQUIPOS" in equipos.columns:
-        eq_key = equipos["EQUIPOS"].astype(str).str.upper().str.strip()
-        # Mapas (si faltan columnas, se quedan como NaN)
-        prop2_map = dict(zip(eq_key, equipos.get("PROPIETARIO2", pd.Series(index=equipos.index, dtype=str)).astype(str)))
-        fam_map = dict(zip(eq_key, equipos.get("FAMILIA", pd.Series(index=equipos.index, dtype=str)).astype(str)))
-        tipo_map = dict(zip(eq_key, equipos.get("TIPO", pd.Series(index=equipos.index, dtype=str)).astype(str)))
-
-        # Tractor
-        if "ID_TRACTOR" in t.columns:
-            k = t["ID_TRACTOR"].astype(str).str.upper().str.strip()
-            t["TRC_PROPIETARIO2"] = k.map(prop2_map)
-            t["TRC_FAMILIA"] = k.map(fam_map)
-            t["TRC_TIPO"] = k.map(tipo_map)
-
-        # Implemento
-        if "ID_IMPLEMENTO" in t.columns:
-            k = t["ID_IMPLEMENTO"].astype(str).str.upper().str.strip()
-            t["IMP_PROPIETARIO2"] = k.map(prop2_map)
-            t["IMP_FAMILIA"] = k.map(fam_map)
-            t["IMP_TIPO"] = k.map(tipo_map)
-
+    # Turno normalizado
     if "TURNO" in t.columns:
         t["TURNO_NORM"] = t["TURNO"].apply(normalize_turno)
     else:
         t["TURNO_NORM"] = None
-    
-    # --------------------------
-    # Propietario / Familia (opcional)
-    # --------------------------
-    if equipos_cat is not None and not equipos_cat.empty:
-        eq_map_prop = dict(zip(equipos_cat["ID_EQUIPO"].astype(str), equipos_cat["PROPIETARIO2"].astype(str)))
-        eq_map_fam = dict(zip(equipos_cat["ID_EQUIPO"].astype(str), equipos_cat["FAMILIA"].astype(str)))
 
-        # Tractor
+    # Catálogo equipos (opcional)
+    t["TRC_PROPIETARIO2"] = None
+    t["TRC_FAMILIA"] = None
+    t["IMP_PROPIETARIO2"] = None
+    t["IMP_FAMILIA"] = None
+
+    if equipos_cat is not None and not equipos_cat.empty and "EQUIPO_CODE" in equipos_cat.columns:
+        # Maps
+        prop_map = dict(zip(equipos_cat["EQUIPO_CODE"], equipos_cat.get("PROPIETARIO2", pd.Series(dtype=str))))
+        fam_map = dict(zip(equipos_cat["EQUIPO_CODE"], equipos_cat.get("FAMILIA", pd.Series(dtype=str))))
+
         if "ID_TRACTOR" in t.columns:
-            t["PROPIETARIO_TRACTOR"] = t["ID_TRACTOR"].astype(str).map(eq_map_prop)
-            t["FAMILIA_TRACTOR"] = t["ID_TRACTOR"].astype(str).map(eq_map_fam)
-        else:
-            t["PROPIETARIO_TRACTOR"] = np.nan
-            t["FAMILIA_TRACTOR"] = np.nan
+            trc_code = t["ID_TRACTOR"].astype(str).str.upper().str.strip()
+            t["TRC_PROPIETARIO2"] = trc_code.map(prop_map)
+            t["TRC_FAMILIA"] = trc_code.map(fam_map)
 
-        # Implemento
         if "ID_IMPLEMENTO" in t.columns:
-            t["PROPIETARIO_IMPLEMENTO"] = t["ID_IMPLEMENTO"].astype(str).map(eq_map_prop)
-            t["FAMILIA_IMPLEMENTO"] = t["ID_IMPLEMENTO"].astype(str).map(eq_map_fam)
-        else:
-            t["PROPIETARIO_IMPLEMENTO"] = np.nan
-            t["FAMILIA_IMPLEMENTO"] = np.nan
-    else:
-        t["PROPIETARIO_TRACTOR"] = np.nan
-        t["FAMILIA_TRACTOR"] = np.nan
-        t["PROPIETARIO_IMPLEMENTO"] = np.nan
-        t["FAMILIA_IMPLEMENTO"] = np.nan
+            imp_code = t["ID_IMPLEMENTO"].astype(str).str.upper().str.strip()
+            t["IMP_PROPIETARIO2"] = imp_code.map(prop_map)
+            t["IMP_FAMILIA"] = imp_code.map(fam_map)
 
     return t
 
@@ -492,35 +462,29 @@ if turn_sel:
 
 
 # -------------------------
-# Filtros adicionales (Catálogo EQUIPOS): Propietario y Familia
+# Filtros adicionales: Propietario y Familia (desde EQUIPOS.csv)
+# Se aplican según la "Vista de KPIs":
+#   - Tractor -> TRC_PROPIETARIO2 / TRC_FAMILIA
+#   - Implemento o Sistema(TRC+IMP) -> IMP_PROPIETARIO2 / IMP_FAMILIA
 # -------------------------
-# Nota: estos filtros se aplican a los IDs de tractor/implemento presentes en TURNOS.
-# Si no existe el Excel/hoja EQUIPOS, estas columnas quedan NaN y los filtros no afectarán.
-prop_opts = ["(Todos)", "AGK", "ALQUILADO"]
-prop_trc = st.sidebar.selectbox("Propietario (Tractor)", prop_opts, index=0, key="prop_trc")
-if prop_trc != "(Todos)":
-    df_tmp = df_tmp[df_tmp["PROPIETARIO_TRACTOR"].astype(str).str.upper() == prop_trc]
+if vista_disp == "Tractor":
+    owner_col = "TRC_PROPIETARIO2"
+    fam_col = "TRC_FAMILIA"
+else:
+    owner_col = "IMP_PROPIETARIO2"
+    fam_col = "IMP_FAMILIA"
 
-fam_
-# =========================
-# Filtros EQUIPOS (Propietario2 / Familia) según vista de KPIs
-# =========================
-prop_col = "IMP_PROPIETARIO2" if vista_disp in ["Sistema (TRC+IMP)", "Implemento"] else "TRC_PROPIETARIO2"
-fam_col = "IMP_FAMILIA" if vista_disp in ["Sistema (TRC+IMP)", "Implemento"] else "TRC_FAMILIA"
+# Propietario
+owner_vals = sorted([x for x in df_tmp.get(owner_col, pd.Series(dtype=str)).dropna().astype(str).unique().tolist() if x and x.lower()!="nan"])
+owner_opts = ["(Todos)"] + owner_vals
+owner_sel = st.sidebar.selectbox("Propietario", owner_opts, index=0, key="owner_sel")
+if owner_sel != "(Todos)" and owner_col in df_tmp.columns:
+    df_tmp = df_tmp[df_tmp[owner_col].astype(str) == str(owner_sel)].copy()
 
-prop_opts = ["(Todos)"]
-if prop_col in df_tmp.columns:
-    prop_opts += sorted([x for x in df_tmp[prop_col].dropna().astype(str).unique().tolist() if x and x != "NAN"])
-prop_sel = st.sidebar.selectbox("Propietario (AGK/ALQUILADO)", prop_opts, index=0, key="prop_sel")
-
-if prop_sel != "(Todos)" and prop_col in df_tmp.columns:
-    df_tmp = df_tmp[df_tmp[prop_col].astype(str) == str(prop_sel)].copy()
-
-fam_opts = ["(Todos)"]
-if fam_col in df_tmp.columns:
-    fam_opts += sorted([x for x in df_tmp[fam_col].dropna().astype(str).unique().tolist() if x and x != "NAN"])
+# Familia (depende del propietario seleccionado)
+fam_vals = sorted([x for x in df_tmp.get(fam_col, pd.Series(dtype=str)).dropna().astype(str).unique().tolist() if x and x.lower()!="nan"])
+fam_opts = ["(Todos)"] + fam_vals
 fam_sel = st.sidebar.selectbox("Familia", fam_opts, index=0, key="fam_sel")
-
 if fam_sel != "(Todos)" and fam_col in df_tmp.columns:
     df_tmp = df_tmp[df_tmp[fam_col].astype(str) == str(fam_sel)].copy()
 
@@ -978,7 +942,7 @@ elif page == "Paretos":
         st.plotly_chart(fig_hm_ct, use_container_width=True)
 
 else:  # page == "Técnico"
-    st.title("Dashboard Técnico (Para acción y mejora)")
+    st.title("Dashboard Técnico (acción y mejora)")
     st.caption("Objetivo: ¿Qué falla? ¿Dónde intervenir primero? ¿Preventivo o correctivo? ¿Qué atacar con RCM?")
 
     if fd_sel is None or fd_sel.empty:
@@ -1027,18 +991,10 @@ else:  # page == "Técnico"
     eq_all = ["(Todos)"] + sorted(list(set(eq_from_fd + eq_from_h)))
 
     c0a, c0b = st.columns([2, 3])
-
     with c0a:
-      eq_sel = st.selectbox(
-         "Equipo",
-         eq_all,
-         index=0,
-         key="tec_eq"
-      )
-
+        eq_sel = st.selectbox("Equipo", eq_all, index=0, key="tec_eq")
     with c0b:
-      st.caption("Cascada: Equipo → Sub unidad → Componente → Parte")
-
+        st.caption("Cascada: Equipo → Sub unidad → Componente → Parte")
 
     df_lvl = fd.copy()
     if eq_sel != "(Todos)":
@@ -1056,7 +1012,7 @@ else:  # page == "Técnico"
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        sis_sel, df_lvl = casc_select("SUB UNIDAD", sistema_col, df_lvl, "tec_sis", disabled=False)
+        sis_sel, df_lvl = casc_select("Sub unidad)", sistema_col, df_lvl, "tec_sis", disabled=False)
     with c2:
         com_sel, df_lvl = casc_select("Componente", comp_col, df_lvl, "tec_com", disabled=(comp_col is None))
     with c3:
