@@ -32,6 +32,33 @@ ZIP_NAME = "TPM_modelo_normalizado_CSV.zip"
 DATA_DIR = Path("data_normalizada")
 
 # =========================================================
+# OPENAI CLIENT
+# =========================================================
+def get_openai_client():
+    if OpenAI is None:
+        return None
+    api_key = st.secrets.get("OPENAI_API_KEY")
+    if not api_key:
+        return None
+    return OpenAI(api_key=api_key)
+
+# =========================================================
+# HELPERS IA
+# =========================================================
+def df_to_markdown(df: pd.DataFrame, max_rows=20, max_cols=12) -> str:
+    if df is None or df.empty:
+        return "(sin datos)"
+    d = df.copy()
+    if d.shape[1] > max_cols:
+        d = d.iloc[:, :max_cols]
+    if d.shape[0] > max_rows:
+        d = d.head(max_rows)
+    try:
+        return d.to_markdown(index=False)
+    except Exception:
+        return d.to_string(index=False)
+
+# =========================================================
 # HELPERS
 # =========================================================
 # -------------------------
@@ -41,11 +68,14 @@ def get_openai_client():
     """Crea el cliente OpenAI usando Streamlit secrets."""
     if OpenAI is None:
         return None
-    api_key = st.secrets.get("OPENAI_API_KEY")
-    if not api_key:
+    key = None
+    try:
+        key = st.secrets.get("OPENAI_API_KEY", None)
+    except Exception:
+        key = None
+    if not key:
         return None
-    return OpenAI(api_key=api_key)
-
+    return OpenAI(api_key=key)
 
 def df_to_markdown(df: pd.DataFrame, max_rows: int = 15, max_cols: int = 10) -> str:
     """Convierte un DataFrame a texto para contexto del LLM (recortado).
@@ -125,6 +155,173 @@ Responde SIEMPRE en español, con formato claro y accionable para taller/campo.
 {top_tables}
 """
     return ctx
+
+def build_ctx_nivel2(
+    *,
+    filtros: Dict,
+    kpis: Dict,
+    df_events: pd.DataFrame,
+    df_prev: Optional[pd.DataFrame] = None,
+    col_dt: str = "DOWNTIME_HR",
+    col_to: str = "TO_HR",
+    col_comp: str = "COMPONENTE",
+    col_subunidad: str = "SUBUNIDAD",
+    col_parte: str = "PARTE",
+    col_verbo: str = "VERBO_TECNICO",
+    col_causa: str = "CAUSA_FALLA",
+    col_equipo: str = "ID_EQUIPO",
+    max_event_rows: int = 15,
+    max_top_items: int = 3,
+    max_verbs: int = 5,
+) -> str:
+    """Construye contexto Nivel 2 (más rico, bajo costo) para el asistente IA.
+    - Incluye KPIs + tendencia (si df_prev) + Pareto top1/top3 + top impacto (DT y fallas)
+      + frecuencia por componente + verbos dominantes + repetitividad + muestra de eventos.
+    """
+
+    def _fmt_num(v, pct=False):
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            return "N/A"
+        try:
+            fv = float(v)
+            if pct:
+                return f"{fv*100:.2f} %"
+            return f"{fv:,.2f}"
+        except Exception:
+            return str(v)
+
+    def _arrow(cur, prev):
+        if cur is None or prev is None:
+            return "N/A"
+        try:
+            cur = float(cur); prev = float(prev)
+            if prev == 0:
+                return "N/A"
+            chg = (cur - prev) / abs(prev)
+            if chg > 0.03:
+                return f"↑ (+{chg*100:.0f} %)"
+            if chg < -0.03:
+                return f"↓ ({chg*100:.0f} %)"
+            return "→ (estable)"
+        except Exception:
+            return "N/A"
+
+    df = df_events.copy() if isinstance(df_events, pd.DataFrame) else pd.DataFrame()
+
+    # KPIs esperados (tolerante a nombres)
+    to_val = kpis.get("TO_real_h", kpis.get("TO", None))
+    dt_val = kpis.get("DT_h", kpis.get("DT", None))
+    nfail = kpis.get("fallas", kpis.get("Fallas", None))
+    mttr = kpis.get("MTTR_h_falla", kpis.get("MTTR", None))
+    mtbf = kpis.get("MTBF_h_falla", kpis.get("MTBF", None))
+    disp = kpis.get("Disponibilidad", None)
+
+    # Tendencia si hay df_prev
+    trend_txt = "(sin periodo anterior)"
+    if isinstance(df_prev, pd.DataFrame) and not df_prev.empty:
+        prev_to = df_prev[col_to].sum() if col_to in df_prev.columns else None
+        prev_dt = df_prev[col_dt].sum() if col_dt in df_prev.columns else None
+        prev_nf = int(len(df_prev))
+        prev_mttr = (prev_dt / prev_nf) if (prev_dt is not None and prev_nf > 0) else None
+        prev_mtbf = (prev_to / prev_nf) if (prev_to is not None and prev_nf > 0) else None
+        trend_txt = "\n".join([
+            f"MTBF: {_arrow(mtbf, prev_mtbf)}",
+            f"MTTR: {_arrow(mttr, prev_mttr)}",
+            f"Downtime: {_arrow(dt_val, prev_dt)}",
+            f"Fallas: {_arrow(nfail, prev_nf)}",
+        ])
+
+    # Pareto + top impacto por componente
+    pareto_top1 = pareto_top3 = None
+    top_lines = ["(sin top impacto)"]
+    freq_lines = ["(no calculable)"]
+    if (not df.empty) and (col_dt in df.columns) and (col_comp in df.columns):
+        grp = (
+            df.groupby(col_comp, dropna=False)
+              .agg(DOWNTIME=(col_dt, "sum"), FALLAS=(col_comp, "size"))
+              .sort_values("DOWNTIME", ascending=False)
+        )
+        total_dt = float(grp["DOWNTIME"].sum()) if grp["DOWNTIME"].sum() else 0.0
+        if total_dt > 0:
+            pareto_top1 = float(grp["DOWNTIME"].head(1).sum() / total_dt)
+            pareto_top3 = float(grp["DOWNTIME"].head(3).sum() / total_dt)
+
+        top_lines = []
+        for comp, row in grp.head(max_top_items).iterrows():
+            top_lines.append(f"{str(comp)} — {float(row['DOWNTIME']):,.1f} h — {int(row['FALLAS'])} fallas")
+
+        # Frecuencia por componente usando TO global
+        freq_lines = []
+        if isinstance(to_val, (int, float, np.integer, np.floating)) and float(to_val) > 0:
+            for comp, row in grp.head(max_top_items).iterrows():
+                fails = float(row["FALLAS"])
+                if fails > 0:
+                    freq = float(to_val) / fails
+                    freq_lines.append(f"- {str(comp)}: 1 falla cada {freq:,.0f} h")
+        if not freq_lines:
+            freq_lines = ["(no calculable: falta TO o fallas)"]
+
+    # Verbos dominantes
+    verb_lines = ["(sin verbos técnicos)"]
+    if (not df.empty) and (col_verbo in df.columns):
+        vc = df[col_verbo].fillna("N/A").astype(str).value_counts()
+        tot = int(vc.sum()) if int(vc.sum()) > 0 else 0
+        verb_lines = []
+        for verbo, cnt in vc.head(max_verbs).items():
+            pct = (cnt / tot) if tot else 0
+            verb_lines.append(f"- {verbo} ({pct*100:.0f} %)")
+
+    # Repetitividad
+    rep_count = 0
+    rep_flag = "N/A"
+    if (not df.empty) and (col_comp in df.columns):
+        c = df[col_comp].fillna("N/A").astype(str).value_counts()
+        rep_count = int((c >= 2).sum())
+        rep_flag = "SÍ" if rep_count > 0 else "NO"
+
+    # Muestra de eventos (compacta)
+    sample_cols = [c for c in [col_equipo, col_subunidad, col_comp, col_parte, col_verbo, col_causa, col_dt] if c in df.columns]
+    sample_df = df[sample_cols].head(max_event_rows) if (not df.empty and sample_cols) else pd.DataFrame()
+
+    filtros_txt = "\n".join([f"- {k}: {v}" for k, v in (filtros or {}).items()])
+
+    ctx = f"""=== CONTEXTO OPERATIVO ===
+{filtros_txt}
+
+=== KPIs CLAVE ===
+Horas operadas (TO): {_fmt_num(to_val)}
+Downtime total (DT): {_fmt_num(dt_val)}
+Número de fallas: {nfail if nfail is not None else 'N/A'}
+MTTR: {_fmt_num(mttr)}
+MTBF: {_fmt_num(mtbf)}
+Disponibilidad: {_fmt_num(disp, pct=True) if isinstance(disp, (int, float, np.integer, np.floating)) else str(disp)}
+
+=== TENDENCIA (vs periodo anterior) ===
+{trend_txt}
+
+=== CONCENTRACIÓN (PARETO) ===
+Top 1 componente: {_fmt_num(pareto_top1, pct=True) if pareto_top1 is not None else 'N/A'}
+Top 3 componentes: {_fmt_num(pareto_top3, pct=True) if pareto_top3 is not None else 'N/A'}
+
+=== TOP COMPONENTES (impacto) ===
+- """ + "\n- ".join(top_lines) + """ 
+
+=== FRECUENCIA POR COMPONENTE (aprox) ===
+""" + "\n".join(freq_lines) + """ 
+
+=== MODOS DOMINANTES (VERBOS) ===
+""" + "\n".join(verb_lines) + f""" 
+
+=== REPETITIVIDAD ===
+Componentes con ≥2 fallas: {rep_count}
+Patrón repetitivo: {rep_flag}
+
+=== MUESTRA DE EVENTOS ===
+{sample_df.to_string(index=False) if not sample_df.empty else '(sin eventos)'}
+""".strip()
+
+    return ctx
+
 def ensure_data_unzipped():
     if DATA_DIR.exists():
         return
@@ -1235,39 +1432,132 @@ else:  # page == "Técnico"
                     "MTBF_h_falla": None if pd.isna(mtbf) else float(mtbf),
                     "Disponibilidad": None if pd.isna(disp_tec) else float(disp_tec),
                 }
-                top_tables_text = {}
-                if isinstance(top_tables, dict) and top_tables.get("top_level"):
-                    top_tables_text = {
-                        "top_level": top_tables["top_level"],
-                        "top_mttr": top_tables["top_mttr"].to_dict(orient="records"),
-                        "top_mtbf": top_tables["top_mtbf"].to_dict(orient="records"),
-                        "top_dt": top_tables["top_dt"].to_dict(orient="records"),
-                    }
+                
+                # (Nivel 2) Contexto mejorado para el asistente: KPIs + Pareto + verbos + repetitividad + muestra
+                filtros_activos = {
+                    "vista_kpis": vista_disp,
+                    "fechas": str(date_range),
+                    "cultivo": cult_choice,
+                    "turno": turn_choice,
+                    "propietario": prop_sel,
+                    "familia": fam_sel,
+                    "tractor": trc_sel,
+                    "implemento": imp_sel,
+                    "proceso": proc_name_sel,
+                    "equipo": eq_sel,
+                    "subunidad": sis_sel,
+                    "componente": com_sel,
+                    "parte": par_sel,
+}
 
-                ctx = build_reliability_context(
-                    vista_disp=vista_disp,
-                    date_range=date_range,
-                    cult_choice=cult_choice,
-                    turn_choice=turn_choice,
-                    prop_sel=prop_sel,
-                    fam_sel=fam_sel,
-                    trc_sel=trc_sel,
-                    imp_sel=imp_sel,
-                    proc_name_sel=proc_name_sel,
-                    eq_sel=eq_sel,
-                    sis_sel=sis_sel if "sis_sel" in locals() else "(N/A)",
-                    com_sel=com_sel if "com_sel" in locals() else "(N/A)",
-                    par_sel=par_sel if "par_sel" in locals() else "(N/A)",
+                # -----------------------------
+                # PERIODO ANTERIOR (automático)
+                # - mismo tamaño de ventana que el rango actual
+                # - termina el día anterior a la fecha de inicio actual
+                # -----------------------------
+                df_prev_kpi = None
+                try:
+                    if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
+                        d1 = pd.to_datetime(date_range[0])
+                        d2 = pd.to_datetime(date_range[1])
+                        win_days = int((d2 - d1).days) + 1
+                        prev_end = d1 - pd.Timedelta(days=1)
+                        prev_start = prev_end - pd.Timedelta(days=win_days - 1)
+
+                        # Turnos del periodo anterior con los mismos filtros globales
+                        df_prev_tmp = turnos.copy()
+                        df_prev_tmp = df_prev_tmp[(df_prev_tmp["FECHA"] >= prev_start) & (df_prev_tmp["FECHA"] <= prev_end)]
+
+                        if cult_sel:
+                            df_prev_tmp = df_prev_tmp[df_prev_tmp["CULTIVO"] == cult_sel]
+                        if turn_sel:
+                            df_prev_tmp = df_prev_tmp[df_prev_tmp["TURNO_NORM"] == turn_sel]
+
+                        if prop_sel != "(Todos)":
+                            m_prop = False
+                            if "TRC_PROPIETARIO" in df_prev_tmp.columns:
+                                m_prop = m_prop | (df_prev_tmp["TRC_PROPIETARIO"].astype(str).str.upper() == str(prop_sel))
+                            if "IMP_PROPIETARIO" in df_prev_tmp.columns:
+                                m_prop = m_prop | (df_prev_tmp["IMP_PROPIETARIO"].astype(str).str.upper() == str(prop_sel))
+                            df_prev_tmp = df_prev_tmp[m_prop]
+
+                        if fam_sel != "(Todos)":
+                            m_fam = False
+                            if "TRC_FAMILIA" in df_prev_tmp.columns:
+                                m_fam = m_fam | (df_prev_tmp["TRC_FAMILIA"].astype(str).str.upper() == str(fam_sel))
+                            if "IMP_FAMILIA" in df_prev_tmp.columns:
+                                m_fam = m_fam | (df_prev_tmp["IMP_FAMILIA"].astype(str).str.upper() == str(fam_sel))
+                            df_prev_tmp = df_prev_tmp[m_fam]
+
+                        if trc_sel != "(Todos)" and "ID_TRACTOR" in df_prev_tmp.columns:
+                            df_prev_tmp = df_prev_tmp[df_prev_tmp["ID_TRACTOR"].astype(str) == str(trc_sel)]
+                        if imp_sel != "(Todos)" and "ID_IMPLEMENTO" in df_prev_tmp.columns:
+                            df_prev_tmp = df_prev_tmp[df_prev_tmp["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
+
+                        if id_proceso_sel is not None and "ID_PROCESO" in df_prev_tmp.columns:
+                            df_prev_tmp = df_prev_tmp[df_prev_tmp["ID_PROCESO"].astype(str) == str(id_proceso_sel)]
+
+                        ids_prev = set(df_prev_tmp["ID_TURNO"].astype(str).tolist())
+
+                        # TO del periodo anterior (horómetros)
+                        horo_prev = horometros[horometros["ID_TURNO"].astype(str).isin(ids_prev)].copy()
+                        prev_to = float(horo_prev["TO_HORO"].sum()) if "TO_HORO" in horo_prev.columns else None
+
+                        # Downtime y fallas del periodo anterior (fallas detalle)
+                        prev_dt = None
+                        prev_nf = None
+                        if fallas_detalle is not None and len(ids_prev) > 0:
+                            if "ID_TURNO" in fallas_detalle.columns:
+                                fd_prev_sel = fallas_detalle[fallas_detalle["ID_TURNO"].astype(str).isin(ids_prev)].copy()
+                            else:
+                                fd_prev_sel = fallas_detalle.copy()
+
+                            fd_prev = norm_cols(fd_prev_sel.copy())
+
+                            # Downtime normalizado a horas
+                            if "DOWNTIME_HR" not in fd_prev.columns:
+                                tf = find_first_col(fd_prev, ["T_FALLA", "TFALLA", "TIEMPO_FALLA", "TIEMPO_DE_FALLA", "DOWNTIME", "DT_HR", "DT_MIN"])
+                                if tf is not None:
+                                    s = pd.to_numeric(fd_prev[tf], errors="coerce")
+                                    if "MIN" in tf.upper():
+                                        fd_prev["DOWNTIME_HR"] = s / 60.0
+                                    else:
+                                        fd_prev["DOWNTIME_HR"] = s
+
+                            prev_dt = float(pd.to_numeric(fd_prev.get("DOWNTIME_HR", 0), errors="coerce").fillna(0).sum())
+                            prev_nf = int(len(fd_prev))
+
+                        # df_prev_kpi (1 fila) para que build_ctx_nivel2 calcule tendencia
+                        if prev_to is not None or prev_dt is not None or prev_nf is not None:
+                            df_prev_kpi = pd.DataFrame([{
+                                "TO_HR": prev_to,
+                                "DOWNTIME_HR": prev_dt,
+                                "FALLAS": prev_nf
+                            }])
+                except Exception:
+                    df_prev_kpi = None
+
+                ctx = build_ctx_nivel2(
+                    filtros=filtros_activos,
                     kpis=kpis,
-                    df_lvl=df_lvl,
-                    top_tables=top_tables_text,
+                    df_events=df_lvl,
+                    df_prev=df_prev_kpi,  # periodo anterior automático
+                    col_dt="DOWNTIME_HR",
+                    col_to="TO_HR",
+                    col_comp="COMPONENTE",
+                    col_subunidad="SUBUNIDAD",
+                    col_parte="PARTE",
+                    col_verbo="VERBO_TECNICO",
+                    col_causa="CAUSA_FALLA",
+                    col_equipo="ID_EQUIPO",
                 )
 
                 instructions = (
                     "Eres un asistente senior de confiabilidad (RCM II / TPM) para una flota agrícola. "
-                    "Usa SOLO el contexto provisto (KPIs y tablas) para sustentar tus conclusiones. "
-                    "Entrega: (1) diagnóstico breve, (2) 3-7 acciones priorizadas, (3) hipótesis de causa raíz, "
-                    "(4) qué datos faltan para confirmar, y (5) qué preventivos/predictivos sugerir."
+                    "Usa SOLO el contexto provisto para sustentar tus conclusiones. "
+                    "Entrega: (1) diagnóstico breve, (2) 3-7 acciones priorizadas, "
+                    "(3) hipótesis de causa raíz, (4) datos faltantes para confirmar, "
+                    "y (5) preventivos/predictivos sugeridos."
                 )
 
                 with st.chat_message("assistant"):
@@ -1284,9 +1574,12 @@ else:  # page == "Técnico"
                             answer = getattr(resp, "output_text", None) or ""
                             st.markdown(answer)
                             st.session_state.ai_msgs.append({"role": "assistant", "content": answer})
+
                         except RateLimitError:
                             st.error(
-                                "⚠️ La API de OpenAI rechazó la solicitud por límite de cuota o billing.\n\n"                "Revisa **Billing / Usage limits** en OpenAI Platform y que tu key pertenezca al proyecto con saldo."
+                                "⚠️ La API de OpenAI rechazó la solicitud por límite de cuota o billing.\n\n"
+                                "Revisa **Billing / Usage limits** en OpenAI Platform y confirma que tu API Key "
+                                "pertenezca al proyecto con saldo."
                             )
                         except Exception as e:
                             st.error(f"❌ Error llamando a OpenAI: {e}")
