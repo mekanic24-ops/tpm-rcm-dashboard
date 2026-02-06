@@ -821,7 +821,7 @@ elif page == "Paretos":
         st.plotly_chart(fig_hm_ct, use_container_width=True)
 
 else:  # page == "Técnico"
-    st.title("Dashboard Técnico (acción y mejora)")
+    st.title("Dashboard Técnico (Para cción y mejora)")
     st.caption("Objetivo: ¿Qué falla? ¿Dónde intervenir primero? ¿Preventivo o correctivo? ¿Qué atacar con RCM?")
 
     if fd_sel is None or fd_sel.empty:
@@ -873,7 +873,7 @@ else:  # page == "Técnico"
     with c0a:
         eq_sel = st.selectbox("Equipo", eq_all, index=0, key="tec_eq")
     with c0b:
-        st.caption("Cascada: Equipo → Sistema(SUB UNIDAD) → Sub sistema → Componente → Parte")
+        st.caption("Cascada: Equipo → SUB UNIDAD → Componente → Parte")
 
     df_lvl = fd.copy()
     if eq_sel != "(Todos)":
@@ -889,14 +889,12 @@ else:  # page == "Técnico"
             df_in = df_in[df_in[colname].astype(str) == str(val)].copy()
         return val, df_in
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3 = st.columns(3)
     with c1:
-        sis_sel, df_lvl = casc_select("Sistema (SUB UNIDAD)", sistema_col, df_lvl, "tec_sis", disabled=False)
+        sis_sel, df_lvl = casc_select("SUB UNIDAD", sistema_col, df_lvl, "tec_sis", disabled=False)
     with c2:
-        sub_sel, df_lvl = casc_select("Sub sistema", subsis_col, df_lvl, "tec_sub", disabled=(subsis_col is None))
-    with c3:
         com_sel, df_lvl = casc_select("Componente", comp_col, df_lvl, "tec_com", disabled=(comp_col is None))
-    with c4:
+    with c3:
         par_sel, df_lvl = casc_select("Parte", parte_col, df_lvl, "tec_par", disabled=(parte_col is None))
 
     st.divider()
