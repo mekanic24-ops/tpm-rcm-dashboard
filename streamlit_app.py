@@ -1,4 +1,7 @@
-# streamlit_app.py
+# =========================================================
+# STREAMLIT APP – DESEMPEÑO OPERACIONAL DE LA FLOTA
+# + ASISTENTE DE CONFIABILIDAD (GPT-4o-mini)
+# =========================================================
 
 import zipfile
 from pathlib import Path
@@ -10,13 +13,15 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit.components.v1 as components
-import streamlit as st
 
-# OpenAI (para Asistente de Confiabilidad)
+# =========================
+# OpenAI
+# =========================
 try:
-    from openai import OpenAI
+    from openai import OpenAI, RateLimitError
 except Exception:
     OpenAI = None
+    RateLimitError = Exception
 
 # =========================================================
 # CONFIG
@@ -36,14 +41,11 @@ def get_openai_client():
     """Crea el cliente OpenAI usando Streamlit secrets."""
     if OpenAI is None:
         return None
-    key = None
-    try:
-        key = st.secrets.get("OPENAI_API_KEY", None)
-    except Exception:
-        key = None
-    if not key:
+    api_key = st.secrets.get("OPENAI_API_KEY")
+    if not api_key:
         return None
-    return OpenAI(api_key=key)
+    return OpenAI(api_key=api_key)
+
 
 def df_to_markdown(df: pd.DataFrame, max_rows: int = 15, max_cols: int = 10) -> str:
     """Convierte un DataFrame a texto para contexto del LLM (recortado).
@@ -1270,17 +1272,7 @@ else:  # page == "Técnico"
 
                 with st.chat_message("assistant"):
                     with st.spinner("Pensando…"):
-                        try:
-                            model_name = st.secrets.get("OPENAI_MODEL", "gpt-4o-mini")
-                        except Exception:
-                            model_name = "gpt-4o-mini"
-
-                        # Llamada a OpenAI con manejo de errores (cuota/billing)
-                        try:
-                            from openai import RateLimitError
-                        except Exception:
-                            RateLimitError = Exception
-
+                        model_name = st.secrets.get("OPENAI_MODEL", "gpt-4o-mini")
                         try:
                             resp = client.responses.create(
                                 model=model_name,
@@ -1290,19 +1282,14 @@ else:  # page == "Técnico"
                                 ],
                             )
                             answer = getattr(resp, "output_text", None) or ""
+                            st.markdown(answer)
+                            st.session_state.ai_msgs.append({"role": "assistant", "content": answer})
                         except RateLimitError:
                             st.error(
-                                "La API de OpenAI rechazó la solicitud por falta de cuota (billing). "
-                                "Activa Billing o recarga crédito en OpenAI Platform."
+                                "⚠️ La API de OpenAI rechazó la solicitud por límite de cuota o billing.\n\n"                "Revisa **Billing / Usage limits** en OpenAI Platform y que tu key pertenezca al proyecto con saldo."
                             )
-                            answer = ""
                         except Exception as e:
-                            st.error(f"Error llamando a OpenAI: {e}")
-                            answer = ""
-
-                    if answer:
-                        st.markdown(answer)
-                        st.session_state.ai_msgs.append({"role": "assistant", "content": answer})
+                            st.error(f"❌ Error llamando a OpenAI: {e}")
 
     st.divider()
 
