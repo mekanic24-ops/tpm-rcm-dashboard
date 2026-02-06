@@ -1268,7 +1268,7 @@ else:  # page == "Técnico"
                         except Exception:
                             model_name = "gpt-4o-mini"
 
-                      from openai import RateLimitError
+                    from openai import RateLimitError
 
 			try:
    			   resp = client.responses.create(
