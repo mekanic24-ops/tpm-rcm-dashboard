@@ -461,56 +461,46 @@ if turn_sel:
     df_tmp = df_tmp[df_tmp["TURNO_NORM"] == turn_sel]
 
 
-# -------------------------
-# Filtros adicionales: Propietario y Familia (desde EQUIPOS.csv)
-# Se aplican según la "Vista de KPIs":
-#   - Tractor -> TRC_PROPIETARIO2 / TRC_FAMILIA
-#   - Implemento o Sistema(TRC+IMP) -> IMP_PROPIETARIO2 / IMP_FAMILIA
-# -------------------------
+# Propietario / Familia (desde EQUIPOS.csv) — segmentación de KPIs
 if vista_disp == "Tractor":
-    owner_col = "TRC_PROPIETARIO2"
-    fam_col = "TRC_FAMILIA"
-else:
-    owner_col = "IMP_PROPIETARIO2"
-    fam_col = "IMP_FAMILIA"
+    owner_cols = ["TRC_PROPIETARIO2"]
+    fam_cols = ["TRC_FAMILIA"]
+elif vista_disp == "Implemento":
+    owner_cols = ["IMP_PROPIETARIO2"]
+    fam_cols = ["IMP_FAMILIA"]
+else:  # Sistema (TRC+IMP)
+    owner_cols = ["TRC_PROPIETARIO2", "IMP_PROPIETARIO2"]
+    fam_cols = ["TRC_FAMILIA", "IMP_FAMILIA"]
 
-# Propietario
-owner_vals = sorted([x for x in df_tmp.get(owner_col, pd.Series(dtype=str)).dropna().astype(str).unique().tolist() if x and x.lower()!="nan"])
+# Propietario (AGK/ALQUILADO)
+owner_vals = set()
+for oc in owner_cols:
+    if oc in df_tmp.columns:
+        owner_vals |= set(df_tmp[oc].dropna().astype(str).str.upper().tolist())
+owner_vals = sorted([x for x in owner_vals if x and x != "NAN"])
 owner_opts = ["(Todos)"] + owner_vals
-owner_sel = st.sidebar.selectbox("Propietario", owner_opts, index=0, key="owner_sel")
-if owner_sel != "(Todos)" and owner_col in df_tmp.columns:
-    df_tmp = df_tmp[df_tmp[owner_col].astype(str) == str(owner_sel)].copy()
+owner_sel = st.sidebar.selectbox("Propietario (AGK/ALQUILADO)", owner_opts, index=0, key="owner_sel")
+if owner_sel != "(Todos)":
+    mask = False
+    for oc in owner_cols:
+        if oc in df_tmp.columns:
+            mask = mask | (df_tmp[oc].astype(str).str.upper() == owner_sel)
+    df_tmp = df_tmp[mask].copy()
 
-# Familia (depende del propietario seleccionado)
-fam_vals = sorted([x for x in df_tmp.get(fam_col, pd.Series(dtype=str)).dropna().astype(str).unique().tolist() if x and x.lower()!="nan"])
+# Familia
+fam_vals = set()
+for fc in fam_cols:
+    if fc in df_tmp.columns:
+        fam_vals |= set(df_tmp[fc].dropna().astype(str).str.upper().tolist())
+fam_vals = sorted([x for x in fam_vals if x and x != "NAN"])
 fam_opts = ["(Todos)"] + fam_vals
 fam_sel = st.sidebar.selectbox("Familia", fam_opts, index=0, key="fam_sel")
-if fam_sel != "(Todos)" and fam_col in df_tmp.columns:
-    df_tmp = df_tmp[df_tmp[fam_col].astype(str) == str(fam_sel)].copy()
-
-trc_opts = ["(Todos)"] + sorted([x for x in df_tmp["FAMILIA_TRACTOR"].dropna().astype(str).str.upper().unique().tolist() if x and x != "NAN"])
-fam_trc = st.sidebar.selectbox("Familia (Tractor)", fam_trc_opts, index=0, key="fam_trc")
-if fam_trc != "(Todos)":
-    df_tmp = df_tmp[df_tmp["FAMILIA_TRACTOR"].astype(str).str.upper() == fam_trc]
-
-prop_imp = st.sidebar.selectbox("Propietario (Implemento)", prop_opts, index=0, key="prop_imp")
-if prop_imp != "(Todos)":
-    df_tmp = df_tmp[df_tmp["PROPIETARIO_IMPLEMENTO"].astype(str).str.upper() == prop_imp]
-
-fam_imp_opts = ["(Todos)"] + sorted([x for x in df_tmp["FAMILIA_IMPLEMENTO"].dropna().astype(str).str.upper().unique().tolist() if x and x != "NAN"])
-fam_imp = st.sidebar.selectbox("Familia (Implemento)", fam_imp_opts, index=0, key="fam_imp")
-if fam_imp != "(Todos)":
-    df_tmp = df_tmp[df_tmp["FAMILIA_IMPLEMENTO"].astype(str).str.upper() == fam_imp]
-
-trc_opts = ["(Todos)"] + sorted(df_tmp["ID_TRACTOR"].dropna().astype(str).unique().tolist())
-trc_sel = st.sidebar.selectbox("Tractor", trc_opts, index=0, key="trc_sel")
-if trc_sel != "(Todos)":
-    df_tmp = df_tmp[df_tmp["ID_TRACTOR"].astype(str) == str(trc_sel)]
-
-imp_opts = ["(Todos)"] + sorted(df_tmp["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist())
-imp_sel = st.sidebar.selectbox("Implemento", imp_opts, index=0, key="imp_sel")
-if imp_sel != "(Todos)":
-    df_tmp = df_tmp[df_tmp["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
+if fam_sel != "(Todos)":
+    mask = False
+    for fc in fam_cols:
+        if fc in df_tmp.columns:
+            mask = mask | (df_tmp[fc].astype(str).str.upper() == fam_sel)
+    df_tmp = df_tmp[mask].copy()
 
 # Proceso (ordenado por TO implemento)
 ids_for_rank = set(df_tmp["ID_TURNO"].astype(str).tolist())
@@ -994,7 +984,7 @@ else:  # page == "Técnico"
     with c0a:
         eq_sel = st.selectbox("Equipo", eq_all, index=0, key="tec_eq")
     with c0b:
-        st.caption("Cascada: Equipo → Sub unidad → Componente → Parte")
+        st.caption("Cascada: Equipo → Sistema(SUB UNIDAD) → Sub sistema → Componente → Parte")
 
     df_lvl = fd.copy()
     if eq_sel != "(Todos)":
@@ -1010,12 +1000,14 @@ else:  # page == "Técnico"
             df_in = df_in[df_in[colname].astype(str) == str(val)].copy()
         return val, df_in
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
-        sis_sel, df_lvl = casc_select("Sub unidad)", sistema_col, df_lvl, "tec_sis", disabled=False)
+        sis_sel, df_lvl = casc_select("Sistema (SUB UNIDAD)", sistema_col, df_lvl, "tec_sis", disabled=False)
     with c2:
-        com_sel, df_lvl = casc_select("Componente", comp_col, df_lvl, "tec_com", disabled=(comp_col is None))
+        sub_sel, df_lvl = casc_select("Sub sistema", subsis_col, df_lvl, "tec_sub", disabled=(subsis_col is None))
     with c3:
+        com_sel, df_lvl = casc_select("Componente", comp_col, df_lvl, "tec_com", disabled=(comp_col is None))
+    with c4:
         par_sel, df_lvl = casc_select("Parte", parte_col, df_lvl, "tec_par", disabled=(parte_col is None))
 
     st.divider()
