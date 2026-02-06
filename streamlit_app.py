@@ -502,6 +502,19 @@ if fam_sel != "(Todos)":
             mask = mask | (df_tmp[fc].astype(str).str.upper() == fam_sel)
     df_tmp = df_tmp[mask].copy()
 
+# -------------------------
+# Tractor / Implemento (cascada)
+# -------------------------
+trc_opts = ["(Todos)"] + sorted([x for x in df_tmp["ID_TRACTOR"].dropna().astype(str).unique().tolist() if x and x.upper() != "NAN"])
+trc_sel = st.sidebar.selectbox("Tractor", trc_opts, index=0, key="trc_sel")
+if trc_sel != "(Todos)":
+    df_tmp = df_tmp[df_tmp["ID_TRACTOR"].astype(str) == str(trc_sel)].copy()
+
+imp_opts = ["(Todos)"] + sorted([x for x in df_tmp["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist() if x and x.upper() != "NAN"])
+imp_sel = st.sidebar.selectbox("Implemento", imp_opts, index=0, key="imp_sel")
+if imp_sel != "(Todos)":
+    df_tmp = df_tmp[df_tmp["ID_IMPLEMENTO"].astype(str) == str(imp_sel)].copy()
+
 # Proceso (ordenado por TO implemento)
 ids_for_rank = set(df_tmp["ID_TURNO"].astype(str).tolist())
 h_rank = horometros[horometros["ID_TURNO"].astype(str).isin(ids_for_rank)].copy()
