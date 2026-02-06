@@ -970,7 +970,7 @@ elif page == "Paretos":
         st.plotly_chart(fig_hm_ct, use_container_width=True)
 
 else:  # page == "Técnico"
-    st.title("Dashboard Técnico (acción y mejora)")
+    st.title("Dashboard Técnico (Para acción y mejora)")
     st.caption("Objetivo: ¿Qué falla? ¿Dónde intervenir primero? ¿Preventivo o correctivo? ¿Qué atacar con RCM?")
 
     if fd_sel is None or fd_sel.empty:
@@ -1041,7 +1041,7 @@ else:  # page == "Técnico"
     c1, c2, c3 = st.columns(3)
     with c1:
         sis_sel, df_lvl = casc_select("Sub unidad", sistema_col, df_lvl, "tec_sis", disabled=False)
-    with c2:
+     with c2:
         com_sel, df_lvl = casc_select("Componente", comp_col, df_lvl, "tec_com", disabled=(comp_col is None))
     with c3:
         par_sel, df_lvl = casc_select("Parte", parte_col, df_lvl, "tec_par", disabled=(parte_col is None))
@@ -1050,21 +1050,44 @@ else:  # page == "Técnico"
 
     # 2) KPIs técnicos
     st.subheader("2) KPIs técnicos (ya filtrados)")
-    # KPI base: usar los mismos filtros globales (sidebar) y además los filtros jerárquicos (cascada).
-    # Si no se elige un equipo específico, el TO debe coincidir con la base del Dashboard (to_base).
-    
-    # TO real según selección de equipo
-    if eq_sel != "(Todos)":
-        to_real = float(horo_sel.loc[horo_sel["ID_EQUIPO"].astype(str) == str(eq_sel), "TO_HORO"].sum())
+    # KPI base: debe reaccionar a (1) filtros globales del sidebar y (2) filtros en cascada.
+    # DT y #Fallas se calculan desde FALLAS_DETALLE (df_lvl). El TO se calcula desde HOROMETROS,
+    # usando los equipos presentes en df_lvl (así también responde cuando filtras por Subunidad/Componente/Parte).
+
+    # Base de HOROMETROS según vista (igual que Dashboard)
+    horo_base = horo_sel.copy()
+    if vista_disp == "Tractor":
+        horo_base = horo_base[horo_base["TIPO_EQUIPO"].astype(str).str.upper() == "TRACTOR"].copy()
+    elif vista_disp == "Implemento":
+        horo_base = horo_base[horo_base["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
     else:
-        to_real = float(to_base) if pd.notna(to_base) else 0.0
-    
-    # KPIs desde FALLAS_DETALLE (ya filtrado por sidebar + cascada)
+        # Sistema (TRC+IMP) => TO base del implemento
+        horo_base = horo_base[horo_base["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
+
+    # Lista de equipos activos según cascada
+    equipos_ctx: List[str] = []
+    if eq_sel != "(Todos)":
+        equipos_ctx = [str(eq_sel).upper().strip()]
+    else:
+        # Si no hay equipo específico, usa los equipos presentes en el dataset filtrado por cascada
+        if equipo_col in df_lvl.columns:
+            equipos_ctx = (
+                df_lvl[equipo_col].dropna().astype(str).str.upper().str.strip().unique().tolist()
+            )
+
+    # TO real (si hay equipos_ctx; si no, cae a la base global)
+    if equipos_ctx:
+        to_real = float(horo_base.loc[horo_base["ID_EQUIPO"].astype(str).str.upper().isin(equipos_ctx), "TO_HORO"].sum())
+    else:
+        to_real = float(horo_base["TO_HORO"].sum()) if not horo_base.empty else 0.0
+
+    # DT y fallas desde FALLAS_DETALLE ya filtrado
     n_fallas = int(len(df_lvl))
     dt_hr = float(df_lvl["DOWNTIME_HR"].sum()) if not df_lvl.empty else 0.0
     mttr = (dt_hr / n_fallas) if n_fallas > 0 else np.nan
     mtbf = (to_real / n_fallas) if n_fallas > 0 else np.nan
     disp_tec = (to_real / (to_real + dt_hr)) if (to_real + dt_hr) > 0 else np.nan
+
     
     cards = [
         kpi_card_html("Horas operadas reales (TO)", fmt_num(to_real), hint="Misma base que Dashboard; si eliges un equipo, usa su TO real"),
