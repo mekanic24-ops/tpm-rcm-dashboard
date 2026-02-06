@@ -1026,11 +1026,19 @@ else:  # page == "Técnico"
     eq_from_h = sorted(horo_sel["ID_EQUIPO"].dropna().astype(str).unique().tolist()) if not horo_sel.empty else []
     eq_all = ["(Todos)"] + sorted(list(set(eq_from_fd + eq_from_h)))
 
-     c0a, c0b = st.columns([2, 3])
-    with c0a:
-        eq_sel = st.selectbox("Equipo", eq_all, index=0, key="tec_eq")
-    with c0b:
-        st.caption("Cascada: Equipo → SUB UNIDAD → Componente → Parte")
+   c0a, c0b = st.columns([2, 3])
+
+with c0a:
+    eq_sel = st.selectbox(
+        "Equipo",
+        eq_all,
+        index=0,
+        key="tec_eq"
+    )
+
+with c0b:
+    st.caption("Cascada: Equipo → Sub unidad → Componente → Parte")
+
 
     df_lvl = fd.copy()
     if eq_sel != "(Todos)":
