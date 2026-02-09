@@ -1662,13 +1662,22 @@ else:  # page == "Técnico"
     bc1, bc2, bc3 = st.columns(3)
     with bc1:
         fig = bar_fallas(df_lvl, sistema_col, "Fallas por Sub unidad", top=top_barras)
-        st.plotly_chart(fig, use_container_width=True) if fig else st.info("Sin datos para Sub unidad.")
+        if fig is not None:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Sin datos para Sub unidad.")
     with bc2:
         fig = bar_fallas(df_lvl, comp_col, "Fallas por Componente", top=top_barras)
-        st.plotly_chart(fig, use_container_width=True) if fig else st.info("Sin datos para Componente.")
+        if fig is not None:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Sin datos para Componente.")
     with bc3:
         fig = bar_fallas(df_lvl, parte_col, "Fallas por Parte", top=top_barras)
-        st.plotly_chart(fig, use_container_width=True) if fig else st.info("Sin datos para Parte.")
+        if fig is not None:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Sin datos para Parte.")
 
     st.divider()
 
