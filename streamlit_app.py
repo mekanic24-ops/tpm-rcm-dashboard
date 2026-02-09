@@ -1,7 +1,4 @@
-# =========================================================
-# STREAMLIT APP – DESEMPEÑO OPERACIONAL DE LA FLOTA
-# + ASISTENTE DE CONFIABILIDAD (GPT-4o-mini)
-# =========================================================
+# streamlit_app.py
 
 import zipfile
 from pathlib import Path
@@ -13,15 +10,7 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit.components.v1 as components
-
-# =========================
-# OpenAI
-# =========================
-try:
-    from openai import OpenAI, RateLimitError
-except Exception:
-    OpenAI = None
-    RateLimitError = Exception
+import streamlit as st
 
 # =========================================================
 # CONFIG
@@ -31,510 +20,262 @@ st.set_page_config(page_title="DESEMPEÑO OPERACIONAL DE LA FLOTA", layout="wide
 ZIP_NAME = "TPM_modelo_normalizado_CSV.zip"
 DATA_DIR = Path("data_normalizada")
 
+
 # =========================================================
-# HELPERS
+# OPENAI (Asistente IA)
 # =========================================================
-# -------------------------
-# IA: Asistente de Confiabilidad
-# -------------------------
 def get_openai_client():
-    """Crea el cliente OpenAI usando Streamlit secrets."""
-    if OpenAI is None:
-        return None
-    key = None
     try:
-        key = st.secrets.get("OPENAI_API_KEY", None)
+        from openai import OpenAI
+        api_key = None
+        try:
+            api_key = st.secrets.get("OPENAI_API_KEY", None)
+        except Exception:
+            api_key = None
+        if not api_key:
+            return None
+        return OpenAI(api_key=api_key)
     except Exception:
-        key = None
-    if not key:
         return None
-    return OpenAI(api_key=key)
 
-def df_to_markdown(df: pd.DataFrame, max_rows: int = 15, max_cols: int = 10) -> str:
-    """Convierte un DataFrame a texto para contexto del LLM (recortado).
-    - Intenta Markdown (requiere `tabulate`).
-    - Si no está disponible, cae a texto plano.
-    """
+try:
+    from openai import RateLimitError
+except Exception:
+    class RateLimitError(Exception):
+        pass
+
+def df_compact(df: pd.DataFrame, name: str, n: int = 10, cols: Optional[List[str]] = None) -> str:
     if df is None or df.empty:
-        return "(sin filas)"
+        return f"{name}: (sin datos)\n"
     d = df.copy()
-    if d.shape[1] > max_cols:
-        d = d.iloc[:, :max_cols]
-    if d.shape[0] > max_rows:
-        d = d.head(max_rows)
-    try:
-        return d.to_markdown(index=False)
-    except Exception:
-        # Fallback robusto (sin dependencia tabulate)
-        return d.to_string(index=False)
+    if cols:
+        cols_ok = [c for c in cols if c in d.columns]
+        if cols_ok:
+            d = d[cols_ok]
+    d = d.head(int(n))
+    return f"{name} (top {min(len(d), n)} filas):\n" + d.to_csv(index=False) + "\n"
 
-def build_reliability_context(
+
+def pareto_table(df: pd.DataFrame, dim_col: str, val_col: str, top_n: int = 10) -> pd.DataFrame:
+    """Devuelve tabla Pareto (Top N) con acumulado y % acumulado."""
+    if df is None or df.empty or dim_col not in df.columns or val_col not in df.columns:
+        return pd.DataFrame()
+    tmp = df[[dim_col, val_col]].copy()
+    tmp[dim_col] = tmp[dim_col].astype(str).replace({"nan": "(Vacío)"}).fillna("(Vacío)")
+    tmp[val_col] = pd.to_numeric(tmp[val_col], errors="coerce").fillna(0.0)
+    g = tmp.groupby(dim_col, dropna=False)[val_col].sum().sort_values(ascending=False).reset_index()
+    g = g.head(int(top_n)).copy()
+    g["ACUM"] = g[val_col].cumsum()
+    total = float(g[val_col].sum())
+    g["ACUM_PCT"] = np.where(total > 0, g["ACUM"] / total, 0.0)
+    return g
+
+@st.cache_data(show_spinner=False)
+def trend_12m_monthly_kpis(
+    turnos: pd.DataFrame,
+    horometros: pd.DataFrame,
+    eventos: pd.DataFrame,
     *,
     vista_disp: str,
-    date_range,
-    cult_choice: str,
-    turn_choice: str,
-    prop_sel: str,
-    fam_sel: str,
-    trc_sel: str,
-    imp_sel: str,
-    proc_name_sel: str,
-    eq_sel: str,
-    sis_sel: str,
-    com_sel: str,
-    par_sel: str,
-    kpis: dict,
-    df_lvl: pd.DataFrame,
-    top_tables: dict,
-) -> str:
-    """Arma el contexto (texto) que se enviará al asistente."""
-    filtros = {
-        "vista_kpis": vista_disp,
-        "fechas": str(date_range),
-        "cultivo": cult_choice,
-        "turno": turn_choice,
-        "propietario": prop_sel,
-        "familia": fam_sel,
-        "tractor": trc_sel,
-        "implemento": imp_sel,
-        "proceso": proc_name_sel,
-        "cascada_equipo": eq_sel,
-        "cascada_subunidad": sis_sel,
-        "cascada_componente": com_sel,
-        "cascada_parte": par_sel,
-    }
-
-    prefer = [
-        "EQUIPO", "ID_EQUIPO", "ID_EQUIPO_AFECTADO",
-        "SUBUNIDAD", "SUB_UNIDAD", "COMPONENTE", "PARTE", "PIEZA",
-        "DOWNTIME_HR", "VERBO_TECNICO", "CAUSA_FALLA",
-    ]
-    cols = [c for c in prefer if c in df_lvl.columns]
-    df_view = df_lvl[cols].copy() if cols else df_lvl.copy()
-
-    ctx = f"""Eres un **Asistente de Confiabilidad y Mantenimiento** (RCM/TPM). 
-Responde SIEMPRE en español, con formato claro y accionable para taller/campo.
-
-## 1) Filtros activos
-{filtros}
-
-## 2) KPIs calculados (ya filtrados)
-{kpis}
-
-## 3) Muestra de fallas (FALLAS_DETALLE) filtradas (primeras filas)
-{df_to_markdown(df_view, max_rows=20, max_cols=12)}
-
-## 4) Top 10 (ya calculados)
-{top_tables}
-"""
-    return ctx
-
-def build_ctx_nivel2(
-    *,
-    filtros: Dict,
-    kpis: Dict,
-    df_events: pd.DataFrame,
-    df_prev: Optional[pd.DataFrame] = None,
-    col_dt: str = "DOWNTIME_HR",
-    col_to: str = "TO_HR",
-    col_comp: str = "COMPONENTE",
-    col_subunidad: str = "SUBUNIDAD",
-    col_parte: str = "PARTE",
-    col_verbo: str = "VERBO_TECNICO",
-    col_causa: str = "CAUSA_FALLA",
-    col_equipo: str = "ID_EQUIPO",
-    max_event_rows: int = 15,
-    max_top_items: int = 3,
-    max_verbs: int = 5,
-) -> str:
-    """Construye contexto Nivel 2 (más rico, bajo costo) para el asistente IA.
-    - Incluye KPIs + tendencia (si df_prev) + Pareto top1/top3 + top impacto (DT y fallas)
-      + frecuencia por componente + verbos dominantes + repetitividad + muestra de eventos.
-    """
-
-    def _fmt_num(v, pct=False):
-        if v is None or (isinstance(v, float) and np.isnan(v)):
-            return "N/A"
-        try:
-            fv = float(v)
-            if pct:
-                return f"{fv*100:.2f} %"
-            return f"{fv:,.2f}"
-        except Exception:
-            return str(v)
-
-    def _arrow(cur, prev):
-        if cur is None or prev is None:
-            return "N/A"
-        try:
-            cur = float(cur); prev = float(prev)
-            if prev == 0:
-                return "N/A"
-            chg = (cur - prev) / abs(prev)
-            if chg > 0.03:
-                return f"↑ (+{chg*100:.0f} %)"
-            if chg < -0.03:
-                return f"↓ ({chg*100:.0f} %)"
-            return "→ (estable)"
-        except Exception:
-            return "N/A"
-
-    df = df_events.copy() if isinstance(df_events, pd.DataFrame) else pd.DataFrame()
-
-    # KPIs esperados (tolerante a nombres)
-    to_val = kpis.get("TO_real_h", kpis.get("TO", None))
-    dt_val = kpis.get("DT_h", kpis.get("DT", None))
-    nfail = kpis.get("fallas", kpis.get("Fallas", None))
-    mttr = kpis.get("MTTR_h_falla", kpis.get("MTTR", None))
-    mtbf = kpis.get("MTBF_h_falla", kpis.get("MTBF", None))
-    disp = kpis.get("Disponibilidad", None)
-
-    # Tendencia si hay df_prev
-    trend_txt = "(sin periodo anterior)"
-    if isinstance(df_prev, pd.DataFrame) and not df_prev.empty:
-        prev_to = df_prev[col_to].sum() if col_to in df_prev.columns else None
-        prev_dt = df_prev[col_dt].sum() if col_dt in df_prev.columns else None
-        prev_nf = int(len(df_prev))
-        prev_mttr = (prev_dt / prev_nf) if (prev_dt is not None and prev_nf > 0) else None
-        prev_mtbf = (prev_to / prev_nf) if (prev_to is not None and prev_nf > 0) else None
-        trend_txt = "\n".join([
-            f"MTBF: {_arrow(mtbf, prev_mtbf)}",
-            f"MTTR: {_arrow(mttr, prev_mttr)}",
-            f"Downtime: {_arrow(dt_val, prev_dt)}",
-            f"Fallas: {_arrow(nfail, prev_nf)}",
-        ])
-
-    # Pareto + top impacto por componente
-    pareto_top1 = pareto_top3 = None
-    top_lines = ["(sin top impacto)"]
-    freq_lines = ["(no calculable)"]
-    if (not df.empty) and (col_dt in df.columns) and (col_comp in df.columns):
-        grp = (
-            df.groupby(col_comp, dropna=False)
-              .agg(DOWNTIME=(col_dt, "sum"), FALLAS=(col_comp, "size"))
-              .sort_values("DOWNTIME", ascending=False)
-        )
-        total_dt = float(grp["DOWNTIME"].sum()) if grp["DOWNTIME"].sum() else 0.0
-        if total_dt > 0:
-            pareto_top1 = float(grp["DOWNTIME"].head(1).sum() / total_dt)
-            pareto_top3 = float(grp["DOWNTIME"].head(3).sum() / total_dt)
-
-        top_lines = []
-        for comp, row in grp.head(max_top_items).iterrows():
-            top_lines.append(f"{str(comp)} — {float(row['DOWNTIME']):,.1f} h — {int(row['FALLAS'])} fallas")
-
-        # Frecuencia por componente usando TO global
-        freq_lines = []
-        if isinstance(to_val, (int, float, np.integer, np.floating)) and float(to_val) > 0:
-            for comp, row in grp.head(max_top_items).iterrows():
-                fails = float(row["FALLAS"])
-                if fails > 0:
-                    freq = float(to_val) / fails
-                    freq_lines.append(f"- {str(comp)}: 1 falla cada {freq:,.0f} h")
-        if not freq_lines:
-            freq_lines = ["(no calculable: falta TO o fallas)"]
-
-    # Verbos dominantes
-    verb_lines = ["(sin verbos técnicos)"]
-    if (not df.empty) and (col_verbo in df.columns):
-        vc = df[col_verbo].fillna("N/A").astype(str).value_counts()
-        tot = int(vc.sum()) if int(vc.sum()) > 0 else 0
-        verb_lines = []
-        for verbo, cnt in vc.head(max_verbs).items():
-            pct = (cnt / tot) if tot else 0
-            verb_lines.append(f"- {verbo} ({pct*100:.0f} %)")
-
-    # Repetitividad
-    rep_count = 0
-    rep_flag = "N/A"
-    if (not df.empty) and (col_comp in df.columns):
-        c = df[col_comp].fillna("N/A").astype(str).value_counts()
-        rep_count = int((c >= 2).sum())
-        rep_flag = "SÍ" if rep_count > 0 else "NO"
-
-    # Muestra de eventos (compacta)
-    sample_cols = [c for c in [col_equipo, col_subunidad, col_comp, col_parte, col_verbo, col_causa, col_dt] if c in df.columns]
-    sample_df = df[sample_cols].head(max_event_rows) if (not df.empty and sample_cols) else pd.DataFrame()
-
-    filtros_txt = "\n".join([f"- {k}: {v}" for k, v in (filtros or {}).items()])
-
-    ctx = f"""=== CONTEXTO OPERATIVO ===
-{filtros_txt}
-
-=== KPIs CLAVE ===
-Horas operadas (TO): {_fmt_num(to_val)}
-Downtime total (DT): {_fmt_num(dt_val)}
-Número de fallas: {nfail if nfail is not None else 'N/A'}
-MTTR: {_fmt_num(mttr)}
-MTBF: {_fmt_num(mtbf)}
-Disponibilidad: {_fmt_num(disp, pct=True) if isinstance(disp, (int, float, np.integer, np.floating)) else str(disp)}
-
-=== TENDENCIA (vs periodo anterior) ===
-{trend_txt}
-
-=== CONCENTRACIÓN (PARETO) ===
-Top 1 componente: {_fmt_num(pareto_top1, pct=True) if pareto_top1 is not None else 'N/A'}
-Top 3 componentes: {_fmt_num(pareto_top3, pct=True) if pareto_top3 is not None else 'N/A'}
-
-=== TOP COMPONENTES (impacto) ===
-- """ + "\n- ".join(top_lines) + """ 
-
-=== FRECUENCIA POR COMPONENTE (aprox) ===
-""" + "\n".join(freq_lines) + """ 
-
-=== MODOS DOMINANTES (VERBOS) ===
-""" + "\n".join(verb_lines) + f""" 
-
-=== REPETITIVIDAD ===
-Componentes con ≥2 fallas: {rep_count}
-Patrón repetitivo: {rep_flag}
-
-=== MUESTRA DE EVENTOS ===
-{sample_df.to_string(index=False) if not sample_df.empty else '(sin eventos)'}
-""".strip()
-
-    return ctx
-
-
-
-# =========================================================
-# TENDENCIA HISTÓRICA (Nivel 2+)
-# - Resumen mensual de últimos N meses (independiente del rango seleccionado)
-# - Basado en TURNOS + HOROMETROS + FALLAS_DETALLE
-# =========================================================
-def _apply_global_filters_no_date(turnos_all: pd.DataFrame,
-                                 cult_sel: Optional[str],
-                                 turn_sel: Optional[str],
-                                 prop_sel: str,
-                                 fam_sel: str,
-                                 trc_sel: str,
-                                 imp_sel: str,
-                                 id_proceso_sel: Optional[str]) -> pd.DataFrame:
-    """Aplica filtros globales SIN rango de fechas (para tendencia histórica)."""
-    base = turnos_all.copy()
-
-    if cult_sel:
-        base = base[base["CULTIVO"] == cult_sel]
-    if turn_sel:
-        base = base[base["TURNO_NORM"] == turn_sel]
-
-    if prop_sel != "(Todos)":
-        m_prop = False
-        if "TRC_PROPIETARIO" in base.columns:
-            m_prop = m_prop | (base["TRC_PROPIETARIO"].astype(str).str.upper() == str(prop_sel))
-        if "IMP_PROPIETARIO" in base.columns:
-            m_prop = m_prop | (base["IMP_PROPIETARIO"].astype(str).str.upper() == str(prop_sel))
-        base = base[m_prop]
-
-    if fam_sel != "(Todos)":
-        m_fam = False
-        if "TRC_FAMILIA" in base.columns:
-            m_fam = m_fam | (base["TRC_FAMILIA"].astype(str).str.upper() == str(fam_sel))
-        if "IMP_FAMILIA" in base.columns:
-            m_fam = m_fam | (base["IMP_FAMILIA"].astype(str).str.upper() == str(fam_sel))
-        base = base[m_fam]
-
-    if trc_sel != "(Todos)" and "ID_TRACTOR" in base.columns:
-        base = base[base["ID_TRACTOR"].astype(str) == str(trc_sel)]
-    if imp_sel != "(Todos)" and "ID_IMPLEMENTO" in base.columns:
-        base = base[base["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
-
-    if id_proceso_sel is not None and "ID_PROCESO" in base.columns:
-        base = base[base["ID_PROCESO"].astype(str) == str(id_proceso_sel)]
-
-    return base
-
-
-def _build_trend_12m_table(
-    *,
-    turnos_all: pd.DataFrame,
-    horometros_all: pd.DataFrame,
-    fallas_detalle_all: Optional[pd.DataFrame],
-    # filtros globales (sin fecha)
     cult_sel: Optional[str],
     turn_sel: Optional[str],
-    prop_sel: str,
-    fam_sel: str,
     trc_sel: str,
     imp_sel: str,
     id_proceso_sel: Optional[str],
-    vista_disp: str,
-    # cascada técnico
-    eq_sel: str,
-    sis_sel: str,
-    com_sel: str,
-    par_sel: str,
+    eq_sel: Optional[str] = None,
     months_back: int = 12,
 ) -> pd.DataFrame:
-    """Construye tabla mensual (últimos N meses) con TO/DT/#Fallas/MTTR/MTBF/Disp.
-    Nota: independiente del rango de fechas del sidebar.
-    """
-    # 1) Turnos históricos base
-    base = _apply_global_filters_no_date(
-        turnos_all, cult_sel, turn_sel, prop_sel, fam_sel, trc_sel, imp_sel, id_proceso_sel
-    )
-    if base.empty:
+    """Calcula KPIs mensuales (últimos N meses) independiente del rango seleccionado."""
+    if turnos is None or turnos.empty:
         return pd.DataFrame()
 
-    base = base.copy()
+    base = turnos.copy()
+    if "FECHA" not in base.columns:
+        return pd.DataFrame()
+
     base["FECHA"] = pd.to_datetime(base["FECHA"], errors="coerce")
     base = base.dropna(subset=["FECHA"])
     if base.empty:
         return pd.DataFrame()
 
-    # Ventana últimos N meses (desde el último dato disponible)
     end = base["FECHA"].max().normalize()
     start = (end - pd.DateOffset(months=months_back)).normalize()
-    base = base[(base["FECHA"] >= start) & (base["FECHA"] <= end)].copy()
+    base = base[(base["FECHA"] >= start) & (base["FECHA"] <= end)]
+
+    if cult_sel:
+        if "CULTIVO" in base.columns:
+            base = base[base["CULTIVO"] == cult_sel]
+    if turn_sel:
+        if "TURNO_NORM" in base.columns:
+            base = base[base["TURNO_NORM"] == turn_sel]
+    if trc_sel and trc_sel != "(Todos)" and "ID_TRACTOR" in base.columns:
+        base = base[base["ID_TRACTOR"].astype(str) == str(trc_sel)]
+    if imp_sel and imp_sel != "(Todos)" and "ID_IMPLEMENTO" in base.columns:
+        base = base[base["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
+    if id_proceso_sel is not None and "ID_PROCESO" in base.columns:
+        base = base[base["ID_PROCESO"].astype(str) == str(id_proceso_sel)]
+
     if base.empty:
         return pd.DataFrame()
 
+    base = base.copy()
     base["MES"] = base["FECHA"].dt.to_period("M").astype(str)
-    ids = set(base["ID_TURNO"].astype(str).tolist())
 
-    # 2) TO mensual (HOROMETROS)
-    h = horometros_all[horometros_all["ID_TURNO"].astype(str).isin(ids)].copy()
+    ids = set(base["ID_TURNO"].astype(str).tolist()) if "ID_TURNO" in base.columns else set()
+    if not ids:
+        return pd.DataFrame()
+
+    # Horómetros
+    h = horometros.copy()
+    if "ID_TURNO" not in h.columns:
+        return pd.DataFrame()
+    h = h[h["ID_TURNO"].astype(str).isin(ids)].copy()
     if h.empty:
-        to_mes = pd.DataFrame({"MES": sorted(base["MES"].unique().tolist()), "TO_HR": 0.0})
-    else:
-        # Vista: igual lógica del Dashboard
+        return pd.DataFrame()
+
+    turn_mes = base[["ID_TURNO", "MES", "ID_TRACTOR", "ID_IMPLEMENTO"]].copy()
+    turn_mes["ID_TURNO"] = turn_mes["ID_TURNO"].astype(str)
+    h2 = h.merge(turn_mes[["ID_TURNO", "MES"]], on="ID_TURNO", how="left")
+
+    # Selección de TO según vista
+    if "TIPO_EQUIPO" in h2.columns:
+        te = h2["TIPO_EQUIPO"].astype(str).str.upper()
         if vista_disp == "Tractor":
-            h = h[h["TIPO_EQUIPO"].astype(str).str.upper() == "TRACTOR"].copy()
+            h2 = h2[te == "TRACTOR"].copy()
         elif vista_disp == "Implemento":
-            h = h[h["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
+            h2 = h2[te == "IMPLEMENTO"].copy()
         else:
-            h = h[h["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
+            # Sistema (TRC+IMP): en tu app se usa implemento como base (mantengo coherencia)
+            h2 = h2[te == "IMPLEMENTO"].copy()
 
-        # Si hay equipo en cascada, TO real del equipo
-        if eq_sel != "(Todos)" and "ID_EQUIPO" in h.columns:
-            h = h[h["ID_EQUIPO"].astype(str).str.upper() == str(eq_sel)].copy()
+    if "TO_HORO" not in h2.columns:
+        return pd.DataFrame()
 
-        turn_mes = base[["ID_TURNO", "MES"]].copy()
-        turn_mes["ID_TURNO"] = turn_mes["ID_TURNO"].astype(str)
+    to_mes = h2.groupby("MES", dropna=True)["TO_HORO"].sum().reset_index(name="TO_HR")
 
-        h2 = h.merge(turn_mes, on="ID_TURNO", how="left")
-        to_mes = h2.groupby("MES", dropna=True)["TO_HORO"].sum().reset_index(name="TO_HR")
-
-    # 3) DT y fallas mensual (FALLAS_DETALLE)
-    if fallas_detalle_all is None or fallas_detalle_all.empty:
+    # Eventos (Fallas)
+    e = eventos.copy()
+    if "ID_TURNO" not in e.columns:
+        return pd.DataFrame()
+    e = e[e["ID_TURNO"].astype(str).isin(ids)].copy()
+    if e.empty:
         dt_mes = pd.DataFrame({"MES": to_mes["MES"], "DT_HR": 0.0, "FALLAS": 0})
     else:
-        fd_sel = fallas_detalle_all.copy()
-        if "ID_TURNO" in fd_sel.columns:
-            fd_sel = fd_sel[fd_sel["ID_TURNO"].astype(str).isin(ids)].copy()
-        fd = norm_cols(fd_sel)
-
-        # Asegurar FECHA vía merge con TURNOS
-        turn_mes = base[["ID_TURNO", "MES", "ID_TRACTOR", "ID_IMPLEMENTO"]].copy()
-        turn_mes["ID_TURNO"] = turn_mes["ID_TURNO"].astype(str)
-
-        if "ID_TURNO" not in fd.columns and "ID" in fd.columns:
-            fd["ID_TURNO"] = safe_norm_str_series(fd["ID"])
-
-        # Downtime en horas
-        if "DOWNTIME_HR" not in fd.columns:
-            tf = find_first_col(fd, ["T_FALLA", "TFALLA", "TIEMPO_FALLA", "TIEMPO_DE_FALLA", "DOWNTIME", "DT_HR", "DT_MIN"])
-            if tf is not None:
-                s = pd.to_numeric(fd[tf], errors="coerce")
-                if "MIN" in tf.upper():
-                    fd["DOWNTIME_HR"] = s / 60.0
-                else:
-                    fd["DOWNTIME_HR"] = _coerce_downtime_to_hr(s)
-            else:
-                fd["DOWNTIME_HR"] = 0.0
-        fd["DOWNTIME_HR"] = pd.to_numeric(fd["DOWNTIME_HR"], errors="coerce").fillna(0.0)
-
-        # Alias
-        if "SUBUNIDAD" not in fd.columns and "SUB_UNIDAD" in fd.columns:
-            fd["SUBUNIDAD"] = fd["SUB_UNIDAD"]
-        if "PARTE" not in fd.columns and "PIEZA" in fd.columns:
-            fd["PARTE"] = fd["PIEZA"]
-
-        equipo_col = find_first_col(fd, ["EQUIPO", "ID_EQUIPO", "ID_EQUIPO_AFECTADO"])
-        if equipo_col is None:
-            return pd.DataFrame()
-
-        fd[equipo_col] = fd[equipo_col].astype(str).str.upper().str.strip()
-
-        # Vista (tractor/implemento) usando el universo del periodo histórico
-        trc_ids = set(base["ID_TRACTOR"].dropna().astype(str).str.upper().tolist())
-        imp_ids = set(base["ID_IMPLEMENTO"].dropna().astype(str).str.upper().tolist())
-
-        if vista_disp == "Tractor":
-            fd = fd[fd[equipo_col].isin(trc_ids)].copy()
-        elif vista_disp == "Implemento":
-            fd = fd[fd[equipo_col].isin(imp_ids)].copy()
+        e = e[e["CATEGORIA_EVENTO"].astype(str).str.upper() == "FALLA"].copy() if "CATEGORIA_EVENTO" in e.columns else e.copy()
+        if "DT_MIN" in e.columns:
+            e["DT_HR"] = pd.to_numeric(e["DT_MIN"], errors="coerce") / 60.0
+        elif "DT_HR" in e.columns:
+            e["DT_HR"] = pd.to_numeric(e["DT_HR"], errors="coerce")
         else:
-            fd = fd[fd[equipo_col].isin(trc_ids.union(imp_ids))].copy()
+            e["DT_HR"] = np.nan
 
-        # Cascada (equipo/sis/com/parte)
-        if eq_sel != "(Todos)":
-            fd = fd[fd[equipo_col].astype(str).str.upper() == str(eq_sel)].copy()
-        if sis_sel != "(Todos)" and "SUBUNIDAD" in fd.columns:
-            fd = fd[fd["SUBUNIDAD"].astype(str) == str(sis_sel)].copy()
-        if com_sel != "(Todos)" and "COMPONENTE" in fd.columns:
-            fd = fd[fd["COMPONENTE"].astype(str) == str(com_sel)].copy()
-        if par_sel != "(Todos)" and "PARTE" in fd.columns:
-            fd = fd[fd["PARTE"].astype(str) == str(par_sel)].copy()
+        e2 = e.merge(turn_mes, on="ID_TURNO", how="left")
 
-        fd2 = fd.merge(turn_mes[["ID_TURNO", "MES"]], on="ID_TURNO", how="left")
+        # Filtrar por equipo específico si aplica (TRC43, IMPxx, etc.)
+        if eq_sel and str(eq_sel) not in ("(Todos)", "(Todas)", "", "None"):
+            if "ID_EQUIPO_AFECTADO" in e2.columns:
+                e2 = e2[e2["ID_EQUIPO_AFECTADO"].astype(str) == str(eq_sel)]
+        else:
+            # mantener coherencia con vista Tractor/Implemento
+            if vista_disp == "Tractor" and "ID_EQUIPO_AFECTADO" in e2.columns and "ID_TRACTOR" in base.columns:
+                trcs = base["ID_TRACTOR"].dropna().astype(str).unique().tolist()
+                e2 = e2[e2["ID_EQUIPO_AFECTADO"].astype(str).isin(trcs)]
+            elif vista_disp == "Implemento" and "ID_EQUIPO_AFECTADO" in e2.columns and "ID_IMPLEMENTO" in base.columns:
+                imps = base["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist()
+                e2 = e2[e2["ID_EQUIPO_AFECTADO"].astype(str).isin(imps)]
 
-        dt_mes = fd2.groupby("MES", dropna=True).agg(
-            DT_HR=("DOWNTIME_HR", "sum"),
-            FALLAS=("DOWNTIME_HR", "size")
+        dt_mes = e2.groupby("MES", dropna=True).agg(
+            DT_HR=("DT_HR", "sum"),
+            FALLAS=("DT_HR", "size"),
         ).reset_index()
 
-    # 4) KPI mensual
     evo = to_mes.merge(dt_mes, on="MES", how="left").fillna({"DT_HR": 0.0, "FALLAS": 0})
     evo["FALLAS"] = evo["FALLAS"].astype(int)
     evo["MTTR_HR"] = np.where(evo["FALLAS"] > 0, evo["DT_HR"] / evo["FALLAS"], np.nan)
     evo["MTBF_HR"] = np.where(evo["FALLAS"] > 0, evo["TO_HR"] / evo["FALLAS"], np.nan)
     evo["DISP"] = np.where((evo["TO_HR"] + evo["DT_HR"]) > 0, evo["TO_HR"] / (evo["TO_HR"] + evo["DT_HR"]), np.nan)
 
-    # Orden cronológico
-    evo["_MES_ORD"] = pd.to_datetime(evo["MES"] + "-01", errors="coerce")
-    evo = evo.sort_values("_MES_ORD").drop(columns=["_MES_ORD"])
-
+    # orden
+    evo["MES_ORD"] = pd.to_datetime(evo["MES"] + "-01", errors="coerce")
+    evo = evo.sort_values("MES_ORD").drop(columns=["MES_ORD"])
     return evo
 
 
-def summarize_trend_signals(evo: pd.DataFrame, last_n: int = 6) -> str:
-    """Señales simples de tendencia (barato en tokens)."""
-    if evo is None or evo.empty:
-        return "(sin histórico suficiente)"
+def render_shared_ai_assistant(
+    *,
+    page_name: str,
+    ctx: str,
+    client,
+    model_default: str = "gpt-4o-mini",
+    state_key: str = "ai_msgs_shared",
+    max_turns: int = 18,
+):
+    st.subheader("🤖 Asistente de Confiabilidad (IA)")
+    st.caption(f"Chat único (compartido). Contexto actual: **{page_name}**.")
 
-    d = evo.tail(last_n).copy()
+    if client is None:
+        st.info("Configura **OPENAI_API_KEY** en Streamlit Cloud → App settings → Secrets para habilitar el asistente.")
+        return
 
-    def _slope(series: pd.Series):
-        series = pd.to_numeric(series, errors="coerce").dropna()
-        if len(series) < 3:
-            return None
-        x = np.arange(len(series))
-        m = np.polyfit(x, series.values, 1)[0]
-        return float(m)
+    if state_key not in st.session_state:
+        st.session_state[state_key] = [
+            {"role": "assistant", "content": "Hola. Soy tu **Asistente de Confiabilidad**. Pregúntame, por ejemplo: *¿Qué debo atacar primero para subir disponibilidad?*"}
+        ]
 
-    s_mtbf = _slope(d["MTBF_HR"]) if "MTBF_HR" in d.columns else None
-    s_mttr = _slope(d["MTTR_HR"]) if "MTTR_HR" in d.columns else None
-    s_dt = _slope(d["DT_HR"]) if "DT_HR" in d.columns else None
+    c1, c2 = st.columns([1, 6])
+    with c1:
+        if st.button("🧹 Limpiar chat", key=f"ai_clear_{page_name}"):
+            st.session_state.pop(state_key, None)
+            st.rerun()
+    with c2:
+        st.caption("Tip: aplica filtros y pregunta. El asistente responde usando el contexto de esta página.")
 
-    def _arrow(m, good_when_up=True):
-        if m is None:
-            return "N/A"
-        if abs(m) < 1e-9:
-            return "→"
-        up = m > 0
-        if good_when_up:
-            return "↑" if up else "↓"
-        else:
-            return "↑" if up else "↓"
+    for m in st.session_state[state_key]:
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
 
-    return (
-        f"Señales (últimos {last_n} meses): "
-        f"MTBF {_arrow(s_mtbf, True)} | "
-        f"MTTR {_arrow(s_mttr, False)} | "
-        f"Downtime {_arrow(s_dt, False)}"
+    user_q = st.chat_input("Escribe tu consulta (usa los filtros actuales)…", key=f"ai_input_{page_name}")
+    if not user_q:
+        return
+
+    st.session_state[state_key].append({"role": "user", "content": user_q})
+    with st.chat_message("user"):
+        st.markdown(user_q)
+
+    instructions = (
+        "Eres un asistente senior de confiabilidad (RCM II / TPM) para una flota agrícola. "
+        "Usa SOLO el contexto provisto para sustentar tus conclusiones (no inventes). "
+        "Si el usuario pide tendencia histórica, solo respóndela si la tabla/series está en el contexto; "
+        "si no, explica qué dato falta o qué filtro debe ajustar. "
+        "Entrega: (1) diagnóstico breve, (2) 3–7 acciones priorizadas, "
+        "(3) hipótesis de causa raíz, (4) datos faltantes para confirmar, "
+        "y (5) sugerencias preventivas/predictivas."
     )
 
+    history = st.session_state[state_key][-max_turns:]
+    messages = [{"role": "system", "content": instructions + "\n\n" + ctx}] + history
+
+    with st.chat_message("assistant"):
+        with st.spinner("Pensando…"):
+            model_name = st.secrets.get("OPENAI_MODEL", model_default)
+            try:
+                resp = client.responses.create(model=model_name, input=messages)
+                answer = getattr(resp, "output_text", None) or ""
+                st.markdown(answer)
+                st.session_state[state_key].append({"role": "assistant", "content": answer})
+            except RateLimitError:
+                st.error(
+                    "⚠️ La API de OpenAI rechazó la solicitud por **límite de cuota/billing**. "
+                    "Revisa tu Billing/Usage en OpenAI Platform."
+                )
+            except Exception as e:
+                st.error(f"❌ Error llamando a OpenAI: {e}")
+
+client = get_openai_client()
+
+# =========================================================
+# HELPERS
+# =========================================================
 def ensure_data_unzipped():
     if DATA_DIR.exists():
         return
@@ -1255,6 +996,58 @@ if page == "Dashboard":
             mime="text/csv",
         )
 
+
+    st.divider()
+    # -------------------------
+    # Asistente IA (Dashboard)
+    # -------------------------
+    ctx_dash = "=== CONTEXTO DASHBOARD ===\n"
+    ctx_dash += f"Vista KPIs: {vista_disp}\nRango fechas (UI): {date_range}\nCultivo: {cult_choice}\nTurno: {turn_choice}\n"
+    ctx_dash += f"Propietario: {prop_sel} | Familia: {fam_sel}\nTractor: {trc_sel} | Implemento: {imp_sel}\nProceso: {proc_name_sel}\n\n"
+
+    ctx_dash += "=== KPIs FILTRADOS (UI) ===\n"
+    ctx_dash += f"TO(h): {to_base:.2f} | DT(h): {dt_base:.2f} | Fallas: {n_base}\n"
+    ctx_dash += f"MTTR(h/f): {mttr_hr if pd.notna(mttr_hr) else 'NA'} | MTBF(h/f): {mtbf_hr if pd.notna(mtbf_hr) else 'NA'} | Disp: {disp if pd.notna(disp) else 'NA'}\n\n"
+
+    evo12 = trend_12m_monthly_kpis(
+        turnos=turnos, horometros=horometros, eventos=eventos,
+        vista_disp=vista_disp,
+        cult_sel=cult_sel, turn_sel=turn_sel,
+        trc_sel=trc_sel, imp_sel=imp_sel,
+        id_proceso_sel=id_proceso_sel,
+        eq_sel=None,
+        months_back=12,
+    )
+    ctx_dash += "=== TENDENCIA (últimos 12 meses, mensual) ===\n"
+    if isinstance(evo12, pd.DataFrame) and not evo12.empty:
+        ctx_dash += df_compact(evo12, "Serie mensual 12M", n=12, cols=["MES","TO_HR","DT_HR","FALLAS","MTTR_HR","MTBF_HR","DISP"])
+    else:
+        ctx_dash += "(sin datos para tendencia 12M con los filtros actuales)\n\n"
+
+    if 'ev_fallas' in locals() and isinstance(ev_fallas, pd.DataFrame) and not ev_fallas.empty:
+        tmp_ev = ev_fallas.copy()
+        if "DT_HR" not in tmp_ev.columns and "DT_MIN" in tmp_ev.columns:
+            tmp_ev["DT_HR"] = pd.to_numeric(tmp_ev["DT_MIN"], errors="coerce")/60.0
+        tmp_ev["DT_HR"] = pd.to_numeric(tmp_ev.get("DT_HR", np.nan), errors="coerce").fillna(0.0)
+        if "ID_EQUIPO_AFECTADO" in tmp_ev.columns:
+            top_eq_dt = tmp_ev.groupby("ID_EQUIPO_AFECTADO")["DT_HR"].sum().sort_values(ascending=False).head(10).reset_index(name="DT_HR")
+            ctx_dash += df_compact(top_eq_dt, "Top 10 Equipos por Downtime (rango UI)", n=10)
+
+    if fd_sel is not None and isinstance(fd_sel, pd.DataFrame) and not fd_sel.empty:
+        fd_ctx = norm_cols(fd_sel.copy())
+        if "DOWNTIME_HR" not in fd_ctx.columns:
+            tf = find_first_col(fd_ctx, ["T_FALLA","TFALLA","TIEMPO_FALLA","TIEMPO_DE_FALLA","DOWNTIME","DT_HR"])
+            if tf is not None:
+                fd_ctx["DOWNTIME_HR"] = _coerce_downtime_to_hr(fd_ctx[tf])
+        fd_ctx["DOWNTIME_HR"] = pd.to_numeric(fd_ctx.get("DOWNTIME_HR", 0.0), errors="coerce").fillna(0.0)
+        if "SUBUNIDAD" in fd_ctx.columns:
+            top_sub = fd_ctx.groupby("SUBUNIDAD")["DOWNTIME_HR"].sum().sort_values(ascending=False).head(10).reset_index(name="DOWNTIME_HR")
+            ctx_dash += df_compact(top_sub, "Top 10 Subunidades por Downtime (rango UI)", n=10)
+        if "COMPONENTE" in fd_ctx.columns:
+            top_comp = fd_ctx.groupby("COMPONENTE")["DOWNTIME_HR"].sum().sort_values(ascending=False).head(10).reset_index(name="DOWNTIME_HR")
+            ctx_dash += df_compact(top_comp, "Top 10 Componentes por Downtime (rango UI)", n=10)
+
+    render_shared_ai_assistant(page_name="Dashboard", ctx=ctx_dash, client=client)
 elif page == "Paretos":
     st.title("Paretos de Fallas + Mapas de calor")
     st.caption("Paretos por Down Time (h) y heatmaps por Equipo vs Nivel (SUBUNIDAD/COMPONENTE/PARTE).")
@@ -1436,8 +1229,55 @@ elif page == "Paretos":
         )
         st.plotly_chart(fig_hm_ct, width="stretch")
 
+
+    st.divider()
+    # -------------------------
+    # Asistente IA (Paretos)
+    # -------------------------
+    ctx_par = "=== CONTEXTO PARETOS ===\n"
+    ctx_par += f"Vista KPIs: {vista_disp}\nRango fechas (UI): {date_range}\nCultivo: {cult_choice}\nTurno: {turn_choice}\n"
+    ctx_par += f"Propietario: {prop_sel} | Familia: {fam_sel}\nTractor: {trc_sel} | Implemento: {imp_sel}\nProceso: {proc_name_sel}\n\n"
+
+    evo12_p = trend_12m_monthly_kpis(
+        turnos=turnos, horometros=horometros, eventos=eventos,
+        vista_disp=vista_disp,
+        cult_sel=cult_sel, turn_sel=turn_sel,
+        trc_sel=trc_sel, imp_sel=imp_sel,
+        id_proceso_sel=id_proceso_sel,
+        eq_sel=None,
+        months_back=12,
+    )
+    ctx_par += "=== TENDENCIA (últimos 12 meses, mensual) ===\n"
+    if isinstance(evo12_p, pd.DataFrame) and not evo12_p.empty:
+        ctx_par += df_compact(evo12_p, "Serie mensual 12M", n=12, cols=["MES","TO_HR","DT_HR","FALLAS","MTTR_HR","MTBF_HR","DISP"])
+    else:
+        ctx_par += "(sin datos para tendencia 12M con los filtros actuales)\n\n"
+
+    ctx_par += "=== PARETOS (Down Time h, rango UI) ===\n"
+    _topn = int(top_n) if 'top_n' in locals() else 10
+    p_sub = pareto_table(fd_view, "SUBUNIDAD", "DOWNTIME_HR", top_n=_topn)
+    p_com = pareto_table(fd_view, "COMPONENTE", "DOWNTIME_HR", top_n=_topn)
+    p_parte = pareto_table(fd_view, "PARTE", "DOWNTIME_HR", top_n=_topn)
+    if not p_sub.empty: ctx_par += df_compact(p_sub, "Pareto SUBUNIDAD", n=10)
+    if not p_com.empty: ctx_par += df_compact(p_com, "Pareto COMPONENTE", n=10)
+    if not p_parte.empty: ctx_par += df_compact(p_parte, "Pareto PARTE", n=10)
+    if "VERBO_TECNICO" in fd_view.columns:
+        p_v = pareto_table(fd_view, "VERBO_TECNICO", "DOWNTIME_HR", top_n=_topn)
+        if not p_v.empty: ctx_par += df_compact(p_v, "Pareto VERBO_TECNICO", n=10)
+    if "CAUSA_FALLA" in fd_view.columns:
+        p_c = pareto_table(fd_view, "CAUSA_FALLA", "DOWNTIME_HR", top_n=_topn)
+        if not p_c.empty: ctx_par += df_compact(p_c, "Pareto CAUSA_FALLA", n=10)
+
+    if 'pivot_dt' in locals() and isinstance(pivot_dt, pd.DataFrame) and not pivot_dt.empty:
+        ctx_par += df_compact(pivot_dt.reset_index(), "Heatmap DT (tabla)", n=12)
+    if 'pivot_ct' in locals() and isinstance(pivot_ct, pd.DataFrame) and not pivot_ct.empty:
+        ctx_par += df_compact(pivot_ct.reset_index(), "Heatmap #Fallas (tabla)", n=12)
+
+    render_shared_ai_assistant(page_name="Paretos", ctx=ctx_par, client=client)
 else:  # page == "Técnico"
     st.title("Dashboard Técnico (Para acción y mejora)")
+
+    st.divider()
     st.caption("Objetivo: ¿Qué falla? ¿Dónde intervenir primero? ¿Preventivo o correctivo? ¿Qué atacar con RCM?")
 
     # ---------------------------------
@@ -1566,187 +1406,6 @@ else:  # page == "Técnico"
     ]
     render_kpi_row(cards, height=205)
 
-    # ---------------------------------
-    # 2B) Asistente de Confiabilidad (IA) — usa filtros + DF ya filtrados
-    # ---------------------------------
-    st.subheader("🧠 Asistente de Confiabilidad (IA)")
-    st.caption("Haz preguntas sobre MTTR/MTBF/Disponibilidad y te devolverá recomendaciones accionables basadas en los datos filtrados.")
-
-    client = get_openai_client()
-    if client is None:
-        st.info("Para activar el asistente, configura **OPENAI_API_KEY** en *Streamlit Cloud → App settings → Secrets*.")
-    else:
-        # Preparar Top 10 rápidos para contexto (sobre el nivel más detallado disponible)
-        top_level = comp_col if (comp_col and comp_col in df_lvl.columns) else parte_col
-        top_tables = {}
-        if top_level is not None and top_level in df_lvl.columns and not df_lvl.empty:
-            g_ai = df_lvl.groupby(top_level, dropna=True).agg(
-                FALLAS=("DOWNTIME_HR", "size"),
-                DT_HR=("DOWNTIME_HR", "sum")
-            ).reset_index().rename(columns={top_level: "ITEM"})
-            g_ai["ITEM"] = g_ai["ITEM"].astype(str)
-            g_ai["MTTR_HR"] = np.where(g_ai["FALLAS"] > 0, g_ai["DT_HR"] / g_ai["FALLAS"], np.nan)
-            g_ai["MTBF_HR"] = np.where(g_ai["FALLAS"] > 0, to_real / g_ai["FALLAS"], np.nan)
-
-            top_tables = {
-                "top_level": top_level,
-                "top_mttr": g_ai.dropna(subset=["MTTR_HR"]).sort_values("MTTR_HR", ascending=False).head(10)[["ITEM","FALLAS","DT_HR","MTTR_HR"]],
-                "top_mtbf": g_ai.dropna(subset=["MTBF_HR"]).sort_values("MTBF_HR", ascending=True).head(10)[["ITEM","FALLAS","DT_HR","MTBF_HR"]],
-                "top_dt": g_ai.sort_values("DT_HR", ascending=False).head(10)[["ITEM","FALLAS","DT_HR"]],
-            }
-
-        left, right = st.columns([2, 1], gap="large")
-
-        with right:
-            st.markdown("#### Contexto usado por el asistente")
-            st.write("**KPIs filtrados**")
-            st.json({
-                "TO_real_h": float(to_real),
-                "DT_h": float(dt_hr),
-                "fallas": int(n_fallas),
-                "MTTR_h_falla": None if pd.isna(mttr) else float(mttr),
-                "MTBF_h_falla": None if pd.isna(mtbf) else float(mtbf),
-                "Disponibilidad": None if pd.isna(disp_tec) else float(disp_tec),
-                "Vista": vista_disp,
-            }, expanded=False)
-
-            st.write("**Muestra de fallas filtradas**")
-            st.dataframe(df_lvl.head(30), use_container_width=True, height=260)
-
-            if isinstance(top_tables, dict) and top_tables.get("top_level"):
-                st.write(f"**Top 10 (nivel: {top_tables['top_level']})**")
-                st.dataframe(top_tables["top_mttr"], use_container_width=True, height=220)
-
-            if st.button("🧹 Limpiar chat", key="ai_clear"):
-                st.session_state.pop("ai_msgs", None)
-                st.rerun()
-
-        with left:
-            if "ai_msgs" not in st.session_state:
-                st.session_state.ai_msgs = [
-                    {"role": "assistant", "content": "Hola. Soy tu **Asistente de Confiabilidad**. Pregúntame, por ejemplo: *¿Qué debo atacar primero para subir disponibilidad?*"}
-                ]
-
-            for m in st.session_state.ai_msgs:
-                with st.chat_message(m["role"]):
-                    st.markdown(m["content"])
-
-            user_q = st.chat_input("Escribe tu consulta (usa los filtros actuales)…", key="ai_input")
-            if user_q:
-                st.session_state.ai_msgs.append({"role": "user", "content": user_q})
-                with st.chat_message("user"):
-                    st.markdown(user_q)
-
-                kpis = {
-                    "TO_real_h": float(to_real),
-                    "DT_h": float(dt_hr),
-                    "fallas": int(n_fallas),
-                    "MTTR_h_falla": None if pd.isna(mttr) else float(mttr),
-                    "MTBF_h_falla": None if pd.isna(mtbf) else float(mtbf),
-                    "Disponibilidad": None if pd.isna(disp_tec) else float(disp_tec),
-                }
-                
-                # (Nivel 2) Contexto mejorado para el asistente: KPIs + Pareto + verbos + repetitividad + muestra
-                filtros_activos = {
-                    "vista_kpis": vista_disp,
-                    "fechas": str(date_range),
-                    "cultivo": cult_choice,
-                    "turno": turn_choice,
-                    "propietario": prop_sel,
-                    "familia": fam_sel,
-                    "tractor": trc_sel,
-                    "implemento": imp_sel,
-                    "proceso": proc_name_sel,
-                    "equipo": eq_sel,
-                    "subunidad": sis_sel,
-                    "componente": com_sel,
-                    "parte": par_sel,
-}
-
-                # -----------------------------
-                # TENDENCIA HISTÓRICA (automática)
-                # - últimos 12 meses por mes
-                # - independiente del rango de fechas seleccionado
-                # -----------------------------
-                evo_hist = _build_trend_12m_table(
-                    turnos_all=turnos,
-                    horometros_all=horometros,
-                    fallas_detalle_all=fallas_detalle,
-                    cult_sel=cult_sel,
-                    turn_sel=turn_sel,
-                    prop_sel=prop_sel,
-                    fam_sel=fam_sel,
-                    trc_sel=trc_sel,
-                    imp_sel=imp_sel,
-                    id_proceso_sel=id_proceso_sel,
-                    vista_disp=vista_disp,
-                    eq_sel=eq_sel,
-                    sis_sel=sis_sel,
-                    com_sel=com_sel,
-                    par_sel=par_sel,
-                    months_back=12,
-                )
-                trend_signal = summarize_trend_signals(evo_hist, last_n=6)
-
-                ctx = build_ctx_nivel2(
-
-                    filtros=filtros_activos,
-                    kpis=kpis,
-                    df_events=df_lvl,
-                    df_prev=None,
-                    col_dt="DOWNTIME_HR",
-                    col_to="TO_HR",
-                    col_comp="COMPONENTE",
-                    col_subunidad="SUBUNIDAD",
-                    col_parte="PARTE",
-                    col_verbo="VERBO_TECNICO",
-                    col_causa="CAUSA_FALLA",
-                    col_equipo="ID_EQUIPO",
-
-                )
-
-                # Añadir tendencia histórica al contexto (tabla compacta)
-                if evo_hist is not None and not evo_hist.empty:
-                    ctx += "\n\n=== TENDENCIA HISTÓRICA (últimos 12 meses, independiente del rango) ===\n"
-                    ctx += trend_signal + "\n\n"
-                    cols_tr = [c for c in ["MES","TO_HR","DT_HR","FALLAS","MTTR_HR","MTBF_HR","DISP"] if c in evo_hist.columns]
-                    ctx += df_to_markdown(evo_hist[cols_tr], max_rows=12, max_cols=7)
-                else:
-                    ctx += "\n\n=== TENDENCIA HISTÓRICA ===\n(sin histórico suficiente con los filtros actuales)\n"
-
-
-                instructions = (
-                    "Eres un asistente senior de confiabilidad (RCM II / TPM) para una flota agrícola. "
-                    "Usa SOLO el contexto provisto para sustentar tus conclusiones. "
-                    "Entrega: (1) diagnóstico breve, (2) 3-7 acciones priorizadas, "
-                    "(3) hipótesis de causa raíz, (4) datos faltantes para confirmar, "
-                    "y (5) preventivos/predictivos sugeridos."
-                )
-
-                with st.chat_message("assistant"):
-                    with st.spinner("Pensando…"):
-                        model_name = st.secrets.get("OPENAI_MODEL", "gpt-4o-mini")
-                        try:
-                            resp = client.responses.create(
-                                model=model_name,
-                                input=[
-                                    {"role": "system", "content": instructions + "\n\n" + ctx},
-                                    {"role": "user", "content": user_q},
-                                ],
-                            )
-                            answer = getattr(resp, "output_text", None) or ""
-                            st.markdown(answer)
-                            st.session_state.ai_msgs.append({"role": "assistant", "content": answer})
-
-                        except RateLimitError:
-                            st.error(
-                                "⚠️ La API de OpenAI rechazó la solicitud por límite de cuota o billing.\n\n"
-                                "Revisa **Billing / Usage limits** en OpenAI Platform y confirma que tu API Key "
-                                "pertenezca al proyecto con saldo."
-                            )
-                        except Exception as e:
-                            st.error(f"❌ Error llamando a OpenAI: {e}")
-
     st.divider()
 
     # ---------------------------------
@@ -1771,22 +1430,13 @@ else:  # page == "Técnico"
     bc1, bc2, bc3 = st.columns(3)
     with bc1:
         fig = bar_fallas(df_lvl, sistema_col, "Fallas por Sub unidad", top=top_barras)
-        if fig is not None:
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Sin datos para Sub unidad.")
+        st.plotly_chart(fig, use_container_width=True) if fig else st.info("Sin datos para Sub unidad.")
     with bc2:
         fig = bar_fallas(df_lvl, comp_col, "Fallas por Componente", top=top_barras)
-        if fig is not None:
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Sin datos para Componente.")
+        st.plotly_chart(fig, use_container_width=True) if fig else st.info("Sin datos para Componente.")
     with bc3:
         fig = bar_fallas(df_lvl, parte_col, "Fallas por Parte", top=top_barras)
-        if fig is not None:
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Sin datos para Parte.")
+        st.plotly_chart(fig, use_container_width=True) if fig else st.info("Sin datos para Parte.")
 
     st.divider()
 
@@ -1820,3 +1470,54 @@ else:  # page == "Técnico"
             st.markdown(center_title(f"Top 10 {top_level} con Down Time alto"), unsafe_allow_html=True)
             d = g.sort_values("DT_HR", ascending=False).head(10)
             st.plotly_chart(px.bar(d, x="DT_HR", y="ITEM", orientation="h"), use_container_width=True)
+
+    st.divider()
+    # -------------------------
+    # Asistente IA (COMPARTIDO) — Técnico (contexto rico)
+    # -------------------------
+    ctx_tec = "=== CONTEXTO TÉCNICO ===\\n"
+    ctx_tec += f"Vista KPIs: {vista_disp}\\nRango fechas (UI): {date_range}\\nCultivo: {cult_choice}\\nTurno: {turn_choice}\\n"
+    ctx_tec += f"Propietario: {prop_sel} | Familia: {fam_sel}\\nTractor: {trc_sel} | Implemento: {imp_sel}\\nProceso: {proc_name_sel}\\n\\n"
+
+    ctx_tec += "=== FILTROS CASCADA ===\\n"
+    ctx_tec += f"Equipo: {eq_sel}\\nSubunidad: {sis_sel}\\nComponente: {com_sel}\\nParte: {par_sel}\\n\\n"
+
+    ctx_tec += "=== KPIs TÉCNICOS (UI + CASCADA) ===\\n"
+    ctx_tec += f"TO_real(h): {to_real:.2f} | DT(h): {dt_hr:.2f} | Fallas: {n_fallas}\\n"
+    ctx_tec += f"MTTR(h/f): {mttr if pd.notna(mttr) else 'NA'} | MTBF(h/f): {mtbf if pd.notna(mtbf) else 'NA'} | Disp: {disp_tec if pd.notna(disp_tec) else 'NA'}\\n\\n"
+
+    evo12_t = trend_12m_monthly_kpis(
+        turnos=turnos, horometros=horometros, eventos=eventos,
+        vista_disp=vista_disp,
+        cult_sel=cult_sel, turn_sel=turn_sel,
+        trc_sel=trc_sel, imp_sel=imp_sel,
+        id_proceso_sel=id_proceso_sel,
+        eq_sel=(eq_sel if eq_sel != "(Todos)" else None),
+        months_back=12,
+    )
+    ctx_tec += "=== TENDENCIA (últimos 12 meses, mensual) ===\\n"
+    if isinstance(evo12_t, pd.DataFrame) and not evo12_t.empty:
+        ctx_tec += df_compact(evo12_t, "Serie mensual 12M", n=12, cols=["MES","TO_HR","DT_HR","FALLAS","MTTR_HR","MTBF_HR","DISP"])
+    else:
+        ctx_tec += "(sin datos para tendencia 12M con los filtros actuales)\\n\\n"
+
+    ctx_tec += "=== PARETOS (rango UI + cascada) ===\\n"
+    if comp_col and comp_col in df_lvl.columns:
+        p_comp = pareto_table(df_lvl, comp_col, "DOWNTIME_HR", top_n=10)
+        if not p_comp.empty: ctx_tec += df_compact(p_comp, "Pareto COMPONENTE (DT)", n=10)
+    if parte_col and parte_col in df_lvl.columns:
+        p_parte = pareto_table(df_lvl, parte_col, "DOWNTIME_HR", top_n=10)
+        if not p_parte.empty: ctx_tec += df_compact(p_parte, "Pareto PARTE (DT)", n=10)
+    if "VERBO_TECNICO" in df_lvl.columns:
+        p_v = pareto_table(df_lvl, "VERBO_TECNICO", "DOWNTIME_HR", top_n=10)
+        if not p_v.empty: ctx_tec += df_compact(p_v, "Pareto VERBO_TECNICO (DT)", n=10)
+    if "CAUSA_FALLA" in df_lvl.columns:
+        p_c = pareto_table(df_lvl, "CAUSA_FALLA", "DOWNTIME_HR", top_n=10)
+        if not p_c.empty: ctx_tec += df_compact(p_c, "Pareto CAUSA_FALLA (DT)", n=10)
+
+    if 'g' in locals() and isinstance(g, pd.DataFrame) and not g.empty:
+        ctx_tec += df_compact(g.sort_values("DT_HR", ascending=False), "Top items (DT alto)", n=10)
+
+    ctx_tec += df_compact(df_lvl, "Muestra de fallas filtradas", n=25)
+
+    render_shared_ai_assistant(page_name="Técnico", ctx=ctx_tec, client=client)
