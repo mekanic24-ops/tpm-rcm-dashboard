@@ -674,11 +674,62 @@ vista_disp = st.sidebar.radio(
 
 min_d = turnos["FECHA"].min()
 max_d = turnos["FECHA"].max()
-date_range = st.sidebar.date_input(
-    "Rango de fechas",
-    value=(min_d.date() if pd.notna(min_d) else None, max_d.date() if pd.notna(max_d) else None),
-    key="date_range",
+
+# ---------------------------------------------------------
+# Selector rápido por AÑO / MES (botones) + rango libre
+# ---------------------------------------------------------
+# Nota: "Mes/Año" genera automáticamente un rango [inicio, fin]
+# y alimenta la misma variable `date_range` usada en todo el script.
+date_mode = st.sidebar.radio(
+    "Modo de fechas",
+    ["Mes/Año", "Rango libre"],
+    index=0,
+    key="date_mode",
 )
+
+# Años disponibles según datos
+_years = (
+    turnos.dropna(subset=["FECHA"])["FECHA"].dt.year.dropna().astype(int).unique().tolist()
+    if "FECHA" in turnos.columns else []
+)
+_years = sorted(_years) if _years else []
+default_year = (_years[-1] if _years else (pd.to_datetime(max_d).year if pd.notna(max_d) else pd.Timestamp.today().year))
+
+month_labels = ["(Todos)", "Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+month_map = {label: i for i, label in enumerate(month_labels) if label != "(Todos)"}
+# month_map: {"Ene":1, ..., "Dic":12}
+
+if date_mode == "Mes/Año":
+    year_choice = st.sidebar.radio(
+        "Año",
+        _years if _years else [default_year],
+        index=(_years.index(default_year) if _years and default_year in _years else 0),
+        key="year_btn",
+    )
+    month_choice = st.sidebar.radio(
+        "Mes",
+        month_labels,
+        index=0,
+        key="month_btn",
+    )
+
+    y = int(year_choice)
+    if month_choice == "(Todos)":
+        start = pd.Timestamp(year=y, month=1, day=1)
+        end = pd.Timestamp(year=y, month=12, day=31)
+    else:
+        m = int(month_map[month_choice])
+        start = pd.Timestamp(year=y, month=m, day=1)
+        end = (start + pd.offsets.MonthEnd(0)).normalize()
+
+    date_range = (start.date(), end.date())
+
+else:
+    date_range = st.sidebar.date_input(
+        "Rango de fechas",
+        value=(min_d.date() if pd.notna(min_d) else None, max_d.date() if pd.notna(max_d) else None),
+        key="date_range",
+    )
 
 df_base = turnos.copy()
 if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
