@@ -801,6 +801,80 @@ def pareto_chart(df: pd.DataFrame, dim_col: str, val_col: str, top_n: int, title
     )
     st.plotly_chart(fig, width="stretch")
 
+
+# =========================================================
+# HELPERS: Gráficos (tendencia + metas + rango Y manual)
+# =========================================================
+MONTH_NAMES_ES = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"]
+
+def render_multi_buttons(label: str, options: List[str], key: str, default: Optional[List[str]] = None) -> List[str]:
+    """Multi-selección en formato 'botones' si existe st.pills; si no, multiselect."""
+    default = default or []
+    try:
+        # Streamlit moderno: st.pills(selection_mode="multi")
+        if hasattr(st, "pills"):
+            sel = st.pills(label, options, selection_mode="multi", default=default, key=key)
+            return sel or []
+    except Exception:
+        pass
+    return st.multiselect(label, options, default=default, key=key)
+
+def opt_float(x):
+    try:
+        if x is None: return None
+        s=str(x).strip()
+        if s=="": return None
+        return float(s)
+    except Exception:
+        return None
+
+
+def add_regression_and_goal(
+    fig: go.Figure,
+    x_labels: List[str],
+    y_values: pd.Series,
+    *,
+    trend_color: str = "green",
+    goal: Optional[float] = None,
+    goal_color: str = "red",
+    y_range: Optional[List[float]] = None,
+):
+    """Agrega línea de tendencia (regresión lineal) y línea de meta (horizontal)."""
+    y = pd.to_numeric(pd.Series(y_values), errors="coerce")
+    if y.notna().sum() >= 2:
+        x_idx = np.arange(len(y), dtype=float)
+        # usar solo puntos válidos
+        mask = y.notna().values
+        x_fit = x_idx[mask]
+        y_fit = y.values[mask].astype(float)
+        if len(y_fit) >= 2:
+            m, b = np.polyfit(x_fit, y_fit, 1)
+            y_pred = m * x_idx + b
+            fig.add_trace(go.Scatter(
+                x=x_labels,
+                y=y_pred,
+                mode="lines",
+                name="Tendencia",
+                line=dict(color=trend_color, width=3),
+            ))
+
+    if goal is not None and not (isinstance(goal, float) and np.isnan(goal)):
+        fig.add_trace(go.Scatter(
+            x=x_labels,
+            y=[goal] * len(x_labels),
+            mode="lines",
+            name="Meta",
+            line=dict(color=goal_color, width=3, dash="dash"),
+        ))
+
+    if y_range and len(y_range) == 2 and all(v is not None for v in y_range):
+        try:
+            fig.update_yaxes(range=y_range)
+        except Exception:
+            pass
+
+    return fig
+
 # =========================================================
 # LOAD
 # =========================================================
@@ -837,11 +911,37 @@ date_range = st.sidebar.date_input(
     key="date_range",
 )
 
+# ---------------------------------
+# Meses / Años como botones (selección múltiple)
+# ---------------------------------
+# Nota: además del rango de fechas, puedes filtrar por años/meses específicos.
+# Si seleccionas meses/años, se aplican sobre el rango de fechas (intersección).
+df_date_src = turnos.copy()
+df_date_src = df_date_src.dropna(subset=["FECHA"]).copy()
+df_date_src["ANIO"] = df_date_src["FECHA"].dt.year.astype(int)
+df_date_src["MES_NUM"] = df_date_src["FECHA"].dt.month.astype(int)
+anio_opts = sorted(df_date_src["ANIO"].unique().tolist())
+mes_opts = [f"{i:02d}-{MONTH_NAMES_ES[i-1]}" for i in range(1, 13)]
+
+with st.sidebar.expander("Meses y años (botones)", expanded=False):
+    anios_sel = render_multi_buttons("Años", [str(a) for a in anio_opts], key="f_anios", default=[])
+    meses_sel = render_multi_buttons("Meses", mes_opts, key="f_meses", default=[])
+
+# normalizar selecciones
+anios_sel_int = [int(a) for a in anios_sel] if anios_sel else []
+meses_sel_int = [int(str(m).split("-")[0]) for m in meses_sel] if meses_sel else []
+
 df_base = turnos.copy()
 if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
     d1 = pd.to_datetime(date_range[0])
     d2 = pd.to_datetime(date_range[1])
     df_base = df_base[(df_base["FECHA"] >= d1) & (df_base["FECHA"] <= d2)]
+
+# aplicar filtro por año/mes (si se seleccionó)
+if anios_sel_int:
+    df_base = df_base[df_base["FECHA"].dt.year.isin(anios_sel_int)]
+if meses_sel_int:
+    df_base = df_base[df_base["FECHA"].dt.month.isin(meses_sel_int)]
 
 cult_label_to_val = {"(Todos)": None, "Palto": "PALTO", "Arandano": "ARANDANO"}
 cult_choice = st.sidebar.radio("Cultivo", ["(Todos)", "Palto", "Arandano"], index=0, key="cult_btn")
@@ -1036,6 +1136,12 @@ if page == "Dashboard":
         d2 = pd.to_datetime(date_range[1])
         base = base[(base["FECHA"] >= d1) & (base["FECHA"] <= d2)]
 
+# aplicar filtro por año/mes (si se seleccionó)
+if anios_sel_int:
+    base = base[base["FECHA"].dt.year.isin(anios_sel_int)]
+if meses_sel_int:
+    base = base[base["FECHA"].dt.month.isin(meses_sel_int)]
+
     if cult_sel:
         base = base[base["CULTIVO"] == cult_sel]
     if turn_sel:
@@ -1096,33 +1202,92 @@ if page == "Dashboard":
         evo["DISP"] = np.where((evo["TO_HR"] + evo["DT_HR"]) > 0, evo["TO_HR"] / (evo["TO_HR"] + evo["DT_HR"]), np.nan)
         evo = evo.sort_values("MES", ascending=True)
 
+        r1_controls = st.expander("⚙️ Metas + línea de tendencia (regresión) + rangos Y (manual)", expanded=False)
+        with r1_controls:
+            st.caption("• Deja en blanco una meta o un rango para no aplicarlo. • DISP se ingresa en % (ej: 96).")
+            cA, cB, cC = st.columns(3)
+            with cA:
+                meta_mttr = opt_float(st.text_input("Meta MTTR (h)", value="", key="dash_meta_mttr"))
+                y_mttr_min = opt_float(st.text_input("Y min MTTR", value="", key="dash_ymin_mttr"))
+                y_mttr_max = opt_float(st.text_input("Y max MTTR", value="", key="dash_ymax_mttr"))
+            with cB:
+                meta_mtbf = opt_float(st.text_input("Meta MTBF (h)", value="", key="dash_meta_mtbf"))
+                y_mtbf_min = opt_float(st.text_input("Y min MTBF", value="", key="dash_ymin_mtbf"))
+                y_mtbf_max = opt_float(st.text_input("Y max MTBF", value="", key="dash_ymax_mtbf"))
+            with cC:
+                auto_zoom_disp = st.checkbox("Auto-zoom DISP (95–100%)", value=True, key="dash_auto_zoom_disp")
+                meta_disp_pct = opt_float(st.text_input("Meta DISP (%)", value="", key="dash_meta_disp"))
+                y_disp_min_pct = opt_float(st.text_input("Y min DISP (%)", value="", key="dash_ymin_disp"))
+                y_disp_max_pct = opt_float(st.text_input("Y max DISP (%)", value="", key="dash_ymax_disp"))
+
+            cD, cE, cF = st.columns(3)
+            with cD:
+                meta_fallas = opt_float(st.text_input("Meta Fallas (n)", value="", key="dash_meta_fallas"))
+                y_fallas_min = opt_float(st.text_input("Y min Fallas", value="", key="dash_ymin_fallas"))
+                y_fallas_max = opt_float(st.text_input("Y max Fallas", value="", key="dash_ymax_fallas"))
+            with cE:
+                meta_to = opt_float(st.text_input("Meta TO (h)", value="", key="dash_meta_to"))
+                y_to_min = opt_float(st.text_input("Y min TO", value="", key="dash_ymin_to"))
+                y_to_max = opt_float(st.text_input("Y max TO", value="", key="dash_ymax_to"))
+            with cF:
+                meta_dt = opt_float(st.text_input("Meta Downtime (h)", value="", key="dash_meta_dt"))
+                y_dt_min = opt_float(st.text_input("Y min Downtime", value="", key="dash_ymin_dt"))
+                y_dt_max = opt_float(st.text_input("Y max Downtime", value="", key="dash_ymax_dt"))
+
+        x_labels = evo["MES"].astype(str).tolist()
+
+        def _yr(minv, maxv):
+            if minv is None or maxv is None:
+                return None
+            return [float(minv), float(maxv)]
+
+        # DISP: convertir % a fracción
+        meta_disp = (meta_disp_pct/100.0) if meta_disp_pct is not None else None
+        disp_range = None
+        if y_disp_min_pct is not None and y_disp_max_pct is not None:
+            disp_range = [float(y_disp_min_pct)/100.0, float(y_disp_max_pct)/100.0]
+        elif auto_zoom_disp:
+            disp_range = [0.95, 1.0]
+
         r1c1, r1c2 = st.columns(2)
         with r1c1:
             fig1 = px.bar(evo, x="MES", y="MTTR_HR", title="MTTR (h/falla) por mes")
+            fig1 = add_regression_and_goal(fig1, x_labels, evo["MTTR_HR"], trend_color="green",
+                                           goal=meta_mttr, goal_color="red", y_range=_yr(y_mttr_min, y_mttr_max))
             fig1.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
             st.plotly_chart(fig1, width="stretch")
         with r1c2:
             fig2 = px.bar(evo, x="MES", y="MTBF_HR", title="MTBF (h/falla) por mes")
+            fig2 = add_regression_and_goal(fig2, x_labels, evo["MTBF_HR"], trend_color="green",
+                                           goal=meta_mtbf, goal_color="red", y_range=_yr(y_mtbf_min, y_mtbf_max))
             fig2.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
             st.plotly_chart(fig2, width="stretch")
 
         r2c1, r2c2 = st.columns(2)
         with r2c1:
             fig3 = px.bar(evo, x="MES", y="DISP", title="Disponibilidad (TO/(TO+DT)) por mes")
+            fig3 = add_regression_and_goal(fig3, x_labels, evo["DISP"], trend_color="green",
+                                           goal=meta_disp, goal_color="red", y_range=disp_range)
             fig3.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20), yaxis_tickformat=".0%")
             st.plotly_chart(fig3, width="stretch")
         with r2c2:
             fig4 = px.bar(evo, x="MES", y="FALLAS", title="Cantidad de fallas por mes")
+            fig4 = add_regression_and_goal(fig4, x_labels, evo["FALLAS"], trend_color="green",
+                                           goal=meta_fallas, goal_color="red", y_range=_yr(y_fallas_min, y_fallas_max))
             fig4.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
             st.plotly_chart(fig4, width="stretch")
 
         r3c1, r3c2 = st.columns(2)
         with r3c1:
             fig5 = px.bar(evo, x="MES", y="TO_HR", title="Tiempo de Operación (TO) por mes (h)")
+            fig5 = add_regression_and_goal(fig5, x_labels, evo["TO_HR"], trend_color="green",
+                                           goal=meta_to, goal_color="red", y_range=_yr(y_to_min, y_to_max))
             fig5.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
             st.plotly_chart(fig5, width="stretch")
         with r3c2:
             fig6 = px.bar(evo, x="MES", y="DT_HR", title="Down Time por mes (h)")
+            fig6 = add_regression_and_goal(fig6, x_labels, evo["DT_HR"], trend_color="green",
+                                           goal=meta_dt, goal_color="red", y_range=_yr(y_dt_min, y_dt_max))
             fig6.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
             st.plotly_chart(fig6, width="stretch")
 
