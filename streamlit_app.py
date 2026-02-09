@@ -676,13 +676,14 @@ min_d = turnos["FECHA"].min()
 max_d = turnos["FECHA"].max()
 
 # ---------------------------------------------------------
-# Selector rápido por AÑO / MES (botones) + rango libre
+# Selector por AÑOS / MESES (multi-selección) + rango libre
 # ---------------------------------------------------------
-# Nota: "Mes/Año" genera automáticamente un rango [inicio, fin]
-# y alimenta la misma variable `date_range` usada en todo el script.
+# - En modo "Años/Meses" puedes marcar múltiples años y múltiples meses.
+# - El filtrado es exacto (por año/mes), no por rango continuo.
+# - Se mantiene `date_range` (min/max del filtro) solo como referencia interna.
 date_mode = st.sidebar.radio(
     "Modo de fechas",
-    ["Mes/Año", "Rango libre"],
+    ["Años/Meses", "Rango libre"],
     index=0,
     key="date_mode",
 )
@@ -693,36 +694,51 @@ _years = (
     if "FECHA" in turnos.columns else []
 )
 _years = sorted(_years) if _years else []
-default_year = (_years[-1] if _years else (pd.to_datetime(max_d).year if pd.notna(max_d) else pd.Timestamp.today().year))
+default_year = (
+    _years[-1]
+    if _years else (pd.to_datetime(max_d).year if pd.notna(max_d) else pd.Timestamp.today().year)
+)
 
-month_labels = ["(Todos)", "Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
-month_map = {label: i for i, label in enumerate(month_labels) if label != "(Todos)"}
-# month_map: {"Ene":1, ..., "Dic":12}
+month_labels = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+month_map = {label: i + 1 for i, label in enumerate(month_labels)}  # {"Ene":1, ..., "Dic":12}
 
-if date_mode == "Mes/Año":
-    year_choice = st.sidebar.radio(
-        "Año",
-        _years if _years else [default_year],
-        index=(_years.index(default_year) if _years and default_year in _years else 0),
-        key="year_btn",
+# Base (sin filtrar por fechas aún)
+df_base = turnos.copy()
+
+if date_mode == "Años/Meses":
+    # Quick toggles
+    all_years = st.sidebar.checkbox("Seleccionar todos los años", value=False, key="all_years")
+    years_default = (_years if all_years else ([default_year] if default_year in _years else (_years[-1:] if _years else [])))
+
+    years_sel = st.sidebar.multiselect(
+        "Años",
+        options=_years if _years else [default_year],
+        default=years_default if years_default else (_years if _years else [default_year]),
+        key="years_sel",
     )
-    month_choice = st.sidebar.radio(
-        "Mes",
-        month_labels,
-        index=0,
-        key="month_btn",
+
+    all_months = st.sidebar.checkbox("Seleccionar todos los meses", value=True, key="all_months")
+    months_default = (month_labels if all_months else [])
+
+    months_sel = st.sidebar.multiselect(
+        "Meses",
+        options=month_labels,
+        default=months_default,
+        key="months_sel",
     )
 
-    y = int(year_choice)
-    if month_choice == "(Todos)":
-        start = pd.Timestamp(year=y, month=1, day=1)
-        end = pd.Timestamp(year=y, month=12, day=31)
+    # Aplicar filtros exactos por año/mes
+    if "FECHA" in df_base.columns and not df_base.empty:
+        if years_sel:
+            df_base = df_base[df_base["FECHA"].dt.year.isin([int(y) for y in years_sel])]
+        if months_sel:
+            df_base = df_base[df_base["FECHA"].dt.month.isin([int(month_map[m]) for m in months_sel])]
+
+    # date_range se conserva como min/max del dataset filtrado
+    if "FECHA" in df_base.columns and not df_base.empty:
+        date_range = (df_base["FECHA"].min().date(), df_base["FECHA"].max().date())
     else:
-        m = int(month_map[month_choice])
-        start = pd.Timestamp(year=y, month=m, day=1)
-        end = (start + pd.offsets.MonthEnd(0)).normalize()
-
-    date_range = (start.date(), end.date())
+        date_range = (min_d.date() if pd.notna(min_d) else None, max_d.date() if pd.notna(max_d) else None)
 
 else:
     date_range = st.sidebar.date_input(
@@ -731,11 +747,10 @@ else:
         key="date_range",
     )
 
-df_base = turnos.copy()
-if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
-    d1 = pd.to_datetime(date_range[0])
-    d2 = pd.to_datetime(date_range[1])
-    df_base = df_base[(df_base["FECHA"] >= d1) & (df_base["FECHA"] <= d2)]
+    if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
+        d1 = pd.to_datetime(date_range[0])
+        d2 = pd.to_datetime(date_range[1])
+        df_base = df_base[(df_base["FECHA"] >= d1) & (df_base["FECHA"] <= d2)]
 
 cult_label_to_val = {"(Todos)": None, "Palto": "PALTO", "Arandano": "ARANDANO"}
 cult_choice = st.sidebar.radio("Cultivo", ["(Todos)", "Palto", "Arandano"], index=0, key="cult_btn")
