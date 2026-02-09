@@ -1408,48 +1408,48 @@ else:  # page == "Técnico"
 
     st.divider()
 
-  # ---------------------------------
-# 3) Análisis por nivel (barras) — 3 gráficos en una fila
-# ---------------------------------
-st.subheader("3) Análisis de fallas por nivel (barras)")
+    # ---------------------------------
+    # 3) Análisis por nivel (barras) — 3 gráficos en una fila
+    # ---------------------------------
+    st.subheader("3) Análisis de fallas por nivel (barras)")
 
-def bar_fallas(df_in, col, title, top=15):
-    if col is None or col not in df_in.columns:
-        return None
-    g = df_in.groupby(col, dropna=True).size().reset_index(name="FALLAS")
-    g[col] = g[col].astype(str)
-    g = g.sort_values("FALLAS", ascending=False).head(int(top))
-    if g.empty:
-        return None
-    fig = px.bar(g, x="FALLAS", y=col, orientation="h", title=title)
-    fig.update_layout(title_x=0.5, margin=dict(l=10, r=10, t=50, b=10), yaxis_title="")
-    return fig
+    def bar_fallas(df_in, col, title, top=15):
+        if col is None or col not in df_in.columns:
+            return None
+            g = df_in.groupby(col, dropna=True).size().reset_index(name="FALLAS")
+            g[col] = g[col].astype(str)
+            g = g.sort_values("FALLAS", ascending=False).head(int(top))
+        if g.empty:
+            return None
+            fig = px.bar(g, x="FALLAS", y=col, orientation="h", title=title)
+            fig.update_layout(title_x=0.5, margin=dict(l=10, r=10, t=50, b=10), yaxis_title="")
+            return fig
 
-top_barras = st.slider("Top por gráfico", min_value=5, max_value=30, value=15, step=1, key="tec_top_barras")
+        top_barras = st.slider("Top por gráfico", min_value=5, max_value=30, value=15, step=1, key="tec_top_barras")
 
-bc1, bc2, bc3 = st.columns(3)
-with bc1:
-    fig = bar_fallas(df_lvl, sistema_col, "Fallas por Sub unidad", top=top_barras)
-    if fig is not None:
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Sin datos para Sub unidad.")
+    bc1, bc2, bc3 = st.columns(3)
+        with bc1:
+            fig = bar_fallas(df_lvl, sistema_col, "Fallas por Sub unidad", top=top_barras)
+        if fig is not None:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Sin datos para Sub unidad.")
 
-with bc2:
-    fig = bar_fallas(df_lvl, comp_col, "Fallas por Componente", top=top_barras)
-    if fig is not None:
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Sin datos para Componente.")
+        with bc2:
+            fig = bar_fallas(df_lvl, comp_col, "Fallas por Componente", top=top_barras)
+            if fig is not None:
+               st.plotly_chart(fig, use_container_width=True)
+            else:
+               st.info("Sin datos para Componente.")
 
-with bc3:
-    fig = bar_fallas(df_lvl, parte_col, "Fallas por Parte", top=top_barras)
-    if fig is not None:
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Sin datos para Parte.")
+        with bc3:
+            fig = bar_fallas(df_lvl, parte_col, "Fallas por Parte", top=top_barras)
+            if fig is not None:
+               st.plotly_chart(fig, use_container_width=True)
+            else:
+               st.info("Sin datos para Parte.")
 
-st.divider()
+    st.divider()
 
     # ---------------------------------
     # 4) Top técnicos (dónde atacar primero)
