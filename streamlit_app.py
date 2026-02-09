@@ -644,6 +644,86 @@ def pareto_chart(df: pd.DataFrame, dim_col: str, val_col: str, top_n: int, title
     )
     st.plotly_chart(fig, width="stretch")
 
+
+# ---------------------------------------------------------
+# Helpers: tendencia (regresión lineal) + auto-zoom de eje Y
+# ---------------------------------------------------------
+def add_linear_trendline(fig: go.Figure, x_labels, y_values, *, name: str = "Tendencia"):
+    """Agrega una línea de tendencia por regresión lineal (y = a*x + b) sobre un eje categórico."""
+    if y_values is None:
+        return fig
+    y = pd.to_numeric(pd.Series(y_values), errors="coerce")
+    x_idx = np.arange(len(y), dtype=float)
+
+    m = y.notna().values
+    if m.sum() < 2:
+        return fig
+
+    x_fit = x_idx[m]
+    y_fit = y.values[m].astype(float)
+
+    try:
+        a, b = np.polyfit(x_fit, y_fit, 1)
+    except Exception:
+        return fig
+
+    y_hat = a * x_idx + b
+    fig.add_trace(
+        go.Scatter(
+            x=list(x_labels),
+            y=y_hat,
+            mode="lines",
+            name=name,
+            hovertemplate=f"{name}: %{{y}}<extra></extra>",
+        )
+    )
+    return fig
+
+
+def compute_auto_y_range(values, *, is_percent: bool = False):
+    """Calcula un rango Y 'inteligente' para resaltar variaciones pequeñas (ej: DISP cerca de 100%)."""
+    s = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+    if s.empty:
+        return None
+
+    vmin = float(s.min())
+    vmax = float(s.max())
+    span = vmax - vmin
+
+    if is_percent:
+        # Caso típico: valores muy cerca de 1.0 → enfocar (ej: 0.95–1.00)
+        if vmax >= 0.90 and span <= 0.03:
+            lo = max(0.0, vmin - 0.01)
+            hi = min(1.0, vmax + 0.005)
+            # asegurar una ventana mínima visible
+            if (hi - lo) < 0.02:
+                mid = (hi + lo) / 2.0
+                lo = max(0.0, mid - 0.01)
+                hi = min(1.0, mid + 0.01)
+            return [lo, hi]
+
+        # caso general porcentual
+        pad = 0.10 * (span if span > 0 else 0.05)
+        lo = max(0.0, vmin - pad)
+        hi = min(1.0, vmax + pad)
+        return [lo, hi]
+
+    # Métricas generales (horas, conteos)
+    if span == 0:
+        pad = max(1.0, abs(vmax) * 0.10)
+        return [vmin - pad, vmax + pad]
+
+    pad = 0.10 * span
+    lo = vmin - pad
+    hi = vmax + pad
+
+    # si todo es positivo, evita que baje demasiado (mejor lectura)
+    if vmin >= 0:
+        lo = max(0.0, lo)
+
+    return [lo, hi]
+
+
 # =========================================================
 # LOAD
 # =========================================================
@@ -938,6 +1018,12 @@ if page == "Dashboard":
     # =========================================================
     st.subheader("Evolución por mes-año (MTTR, MTBF, Disponibilidad, Fallas, TO y Down Time)")
 
+
+with st.expander("⚙️ Opciones de gráficos", expanded=False):
+    show_trend = st.checkbox("Mostrar línea de tendencia (regresión lineal)", value=True, key="show_trend")
+    auto_zoom_y = st.checkbox("Auto-zoom del eje Y (mejor para series cerca a 100%)", value=True, key="auto_zoom_y")
+
+
     base = turnos.copy()
 
     if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
@@ -1009,30 +1095,72 @@ if page == "Dashboard":
         with r1c1:
             fig1 = px.bar(evo, x="MES", y="MTTR_HR", title="MTTR (h/falla) por mes")
             fig1.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
+            
+if 'show_trend' in locals() and show_trend:
+    add_linear_trendline(fig1, evo["MES"], evo["MTTR_HR"], name="Tendencia")
+if 'auto_zoom_y' in locals() and auto_zoom_y:
+    yr = compute_auto_y_range(evo["MTTR_HR"], is_percent=False)
+    if yr is not None:
+        fig1.update_yaxes(range=yr)
             st.plotly_chart(fig1, width="stretch")
         with r1c2:
             fig2 = px.bar(evo, x="MES", y="MTBF_HR", title="MTBF (h/falla) por mes")
             fig2.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
+            
+if 'show_trend' in locals() and show_trend:
+    add_linear_trendline(fig2, evo["MES"], evo["MTBF_HR"], name="Tendencia")
+if 'auto_zoom_y' in locals() and auto_zoom_y:
+    yr = compute_auto_y_range(evo["MTBF_HR"], is_percent=False)
+    if yr is not None:
+        fig2.update_yaxes(range=yr)
             st.plotly_chart(fig2, width="stretch")
 
         r2c1, r2c2 = st.columns(2)
         with r2c1:
             fig3 = px.bar(evo, x="MES", y="DISP", title="Disponibilidad (TO/(TO+DT)) por mes")
             fig3.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20), yaxis_tickformat=".0%")
+            
+if 'show_trend' in locals() and show_trend:
+    add_linear_trendline(fig3, evo["MES"], evo["DISP"], name="Tendencia")
+if 'auto_zoom_y' in locals() and auto_zoom_y:
+    yr = compute_auto_y_range(evo["DISP"], is_percent=True)
+    if yr is not None:
+        fig3.update_yaxes(range=yr)
             st.plotly_chart(fig3, width="stretch")
         with r2c2:
             fig4 = px.bar(evo, x="MES", y="FALLAS", title="Cantidad de fallas por mes")
             fig4.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
+            
+if 'show_trend' in locals() and show_trend:
+    add_linear_trendline(fig4, evo["MES"], evo["FALLAS"], name="Tendencia")
+if 'auto_zoom_y' in locals() and auto_zoom_y:
+    yr = compute_auto_y_range(evo["FALLAS"], is_percent=False)
+    if yr is not None:
+        fig4.update_yaxes(range=yr)
             st.plotly_chart(fig4, width="stretch")
 
         r3c1, r3c2 = st.columns(2)
         with r3c1:
             fig5 = px.bar(evo, x="MES", y="TO_HR", title="Tiempo de Operación (TO) por mes (h)")
             fig5.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
+            
+if 'show_trend' in locals() and show_trend:
+    add_linear_trendline(fig5, evo["MES"], evo["TO_HR"], name="Tendencia")
+if 'auto_zoom_y' in locals() and auto_zoom_y:
+    yr = compute_auto_y_range(evo["TO_HR"], is_percent=False)
+    if yr is not None:
+        fig5.update_yaxes(range=yr)
             st.plotly_chart(fig5, width="stretch")
         with r3c2:
             fig6 = px.bar(evo, x="MES", y="DT_HR", title="Down Time por mes (h)")
             fig6.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
+            
+if 'show_trend' in locals() and show_trend:
+    add_linear_trendline(fig6, evo["MES"], evo["DT_HR"], name="Tendencia")
+if 'auto_zoom_y' in locals() and auto_zoom_y:
+    yr = compute_auto_y_range(evo["DT_HR"], is_percent=False)
+    if yr is not None:
+        fig6.update_yaxes(range=yr)
             st.plotly_chart(fig6, width="stretch")
 
     st.subheader("Descargar datos filtrados")
