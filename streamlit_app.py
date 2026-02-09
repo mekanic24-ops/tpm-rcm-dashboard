@@ -1646,7 +1646,7 @@ else:  # page == "Técnico"
     st.subheader("3) Análisis de fallas por nivel (barras)")
 
     def bar_fallas(df_in, col, title, top=15):
-        if df_in is None or df_in.empty or col is None or col not in df_in.columns:
+        if col is None or col not in df_in.columns:
             return None
         g = df_in.groupby(col, dropna=True).size().reset_index(name="FALLAS")
         g[col] = g[col].astype(str)
