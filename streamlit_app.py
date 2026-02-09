@@ -201,6 +201,163 @@ def trend_12m_monthly_kpis(
     return evo
 
 
+# =========================================================
+# MENSAJE EJECUTIVO AUTOMÁTICO (para Dashboard)
+# =========================================================
+def _safe_float(x):
+    try:
+        if x is None:
+            return np.nan
+        return float(x)
+    except Exception:
+        return np.nan
+
+def _fmt_pct(x, dec=1):
+    x = _safe_float(x)
+    if np.isnan(x):
+        return "N/A"
+    return f"{x*100:.{dec}f}%"
+
+def _fmt_num(x, dec=1):
+    x = _safe_float(x)
+    if np.isnan(x):
+        return "N/A"
+    return f"{x:,.{dec}f}"
+
+def _trend_arrow(series, higher_is_better=True):
+    s = pd.to_numeric(pd.Series(series), errors="coerce").dropna()
+    if len(s) < 3:
+        return "N/A"
+    x = np.arange(len(s), dtype=float)
+    try:
+        m = np.polyfit(x, s.values.astype(float), 1)[0]
+    except Exception:
+        return "N/A"
+    if abs(m) < 1e-8:
+        return "→"
+    if higher_is_better:
+        return "↑" if m > 0 else "↓"
+    # para métricas donde subir es malo (MTTR/DT)
+    return "↓" if m < 0 else "↑"
+
+def _pareto_topk(df, dim_col, val_col, k=3):
+    if df is None or df.empty or dim_col not in df.columns or val_col not in df.columns:
+        return (np.nan, np.nan, [])
+    tmp = df[[dim_col, val_col]].copy()
+    tmp[dim_col] = tmp[dim_col].astype(str).replace({"nan": "(Vacío)"}).fillna("(Vacío)")
+    tmp[val_col] = pd.to_numeric(tmp[val_col], errors="coerce").fillna(0.0)
+    g = tmp.groupby(dim_col, dropna=False)[val_col].sum().sort_values(ascending=False)
+    total = float(g.sum())
+    if total <= 0:
+        return (np.nan, np.nan, [])
+    top1 = float(g.head(1).sum() / total)
+    topk = float(g.head(k).sum() / total)
+    items = [(str(i), float(v)) for i, v in g.head(k).items()]
+    return (top1, topk, items)
+
+def build_exec_context(
+    *,
+    filtros_txt: str,
+    kpis: dict,
+    trend_monthly: Optional[pd.DataFrame],
+    pareto_df: Optional[pd.DataFrame],
+    pareto_group_col: str,
+    pareto_value_col: str,
+    metas: Optional[dict] = None,
+) -> str:
+    metas = metas or {}
+
+    # baseline 6M si no hay metas
+    baseline = {}
+    if trend_monthly is not None and isinstance(trend_monthly, pd.DataFrame) and not trend_monthly.empty:
+        last6 = trend_monthly.tail(6)
+        col_map = {"DISP": "DISP", "MTBF": "MTBF_HR", "MTTR": "MTTR_HR", "DT": "DT_HR", "TO": "TO_HR", "FALLAS": "FALLAS"}
+        for k, c in col_map.items():
+            if c in last6.columns:
+                baseline[k] = pd.to_numeric(last6[c], errors="coerce").mean()
+
+    disp = _safe_float(kpis.get("DISP"))
+    mtbf = _safe_float(kpis.get("MTBF"))
+    mttr = _safe_float(kpis.get("MTTR"))
+    dt   = _safe_float(kpis.get("DT"))
+    nf   = _safe_float(kpis.get("FALLAS"))
+    to   = _safe_float(kpis.get("TO"))
+
+    ref_disp = _safe_float(metas.get("DISP", baseline.get("DISP")))
+    ref_mttr = _safe_float(metas.get("MTTR", baseline.get("MTTR")))
+    ref_mtbf = _safe_float(metas.get("MTBF", baseline.get("MTBF")))
+
+    tr_disp = tr_mtbf = tr_mttr = tr_dt = "N/A"
+    if trend_monthly is not None and isinstance(trend_monthly, pd.DataFrame) and not trend_monthly.empty:
+        if "DISP" in trend_monthly.columns:
+            tr_disp = _trend_arrow(trend_monthly["DISP"], True)
+        if "MTBF_HR" in trend_monthly.columns:
+            tr_mtbf = _trend_arrow(trend_monthly["MTBF_HR"], True)
+        if "MTTR_HR" in trend_monthly.columns:
+            tr_mttr = _trend_arrow(trend_monthly["MTTR_HR"], False)
+        if "DT_HR" in trend_monthly.columns:
+            tr_dt = _trend_arrow(trend_monthly["DT_HR"], False)
+
+    p1, p3, items = _pareto_topk(pareto_df, pareto_group_col, pareto_value_col, k=3)
+    items_txt = ", ".join([f"{n} ({v:,.1f})" for n, v in items]) if items else "N/A"
+
+    ctx = f"""
+=== FILTROS (resumen) ===
+{filtros_txt}
+
+=== KPIs ACTUALES (periodo seleccionado UI) ===
+TO: {_fmt_num(to,1)} h
+DT: {_fmt_num(dt,1)} h
+Fallas: {_fmt_num(nf,0)}
+MTTR: {_fmt_num(mttr,2)} h
+MTBF: {_fmt_num(mtbf,2)} h
+Disponibilidad: {_fmt_pct(disp)}
+
+=== REFERENCIA (meta o baseline 6M) ===
+DISP ref: {_fmt_pct(ref_disp)}
+MTTR ref: {_fmt_num(ref_mttr,2)} h
+MTBF ref: {_fmt_num(ref_mtbf,2)} h
+
+=== TENDENCIA (últimos 6 meses, mensual) ===
+Disponibilidad: {tr_disp}
+MTBF: {tr_mtbf}
+MTTR: {tr_mttr}
+Downtime: {tr_dt}
+
+=== PARETO (según downtime del periodo UI) ===
+Top 1 contribuye: {_fmt_pct(p1)}
+Top 3 contribuyen: {_fmt_pct(p3)}
+Top 3 items: {items_txt}
+""".strip()
+    return ctx
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _exec_msg_cache(model_name: str, ctx: str):
+    # cachea por combinación (modelo + contexto)
+    return {"model": model_name, "ctx": ctx}
+
+def generate_exec_message(client, model_name: str, ctx: str) -> str:
+    sys_prompt = (
+        "Eres un Gerente de Confiabilidad Senior reportando a Dirección. "
+        "Con el contexto provisto, escribe un MENSAJE EJECUTIVO (máx 8 líneas) con: "
+        "(1) estado: bajo control / en riesgo / fuera de control, "
+        "(2) KPI crítico, (3) tendencia relevante, (4) causa dominante Pareto, "
+        "(5) 3 acciones gerenciales priorizadas (no técnicas). "
+        "Sé directo. No expliques cálculos. No inventes datos."
+    )
+    payload = _exec_msg_cache(model_name, ctx)
+    try:
+        resp = client.responses.create(
+            model=payload["model"],
+            input=[
+                {"role": "system", "content": sys_prompt + "\n\n" + payload["ctx"]},
+                {"role": "user", "content": "Genera el mensaje ejecutivo ahora."},
+            ],
+        )
+        return getattr(resp, "output_text", None) or ""
+    except Exception as e:
+        return f"❌ No se pudo generar el mensaje ejecutivo: {e}"
+
 def render_shared_ai_assistant(
     *,
     page_name: str,
@@ -644,86 +801,6 @@ def pareto_chart(df: pd.DataFrame, dim_col: str, val_col: str, top_n: int, title
     )
     st.plotly_chart(fig, width="stretch")
 
-
-# ---------------------------------------------------------
-# Helpers: tendencia (regresión lineal) + auto-zoom de eje Y
-# ---------------------------------------------------------
-def add_linear_trendline(fig: go.Figure, x_labels, y_values, *, name: str = "Tendencia"):
-    """Agrega una línea de tendencia por regresión lineal (y = a*x + b) sobre un eje categórico."""
-    if y_values is None:
-        return fig
-    y = pd.to_numeric(pd.Series(y_values), errors="coerce")
-    x_idx = np.arange(len(y), dtype=float)
-
-    m = y.notna().values
-    if m.sum() < 2:
-        return fig
-
-    x_fit = x_idx[m]
-    y_fit = y.values[m].astype(float)
-
-    try:
-        a, b = np.polyfit(x_fit, y_fit, 1)
-    except Exception:
-        return fig
-
-    y_hat = a * x_idx + b
-    fig.add_trace(
-        go.Scatter(
-            x=list(x_labels),
-            y=y_hat,
-            mode="lines",
-            name=name,
-            hovertemplate=f"{name}: %{{y}}<extra></extra>",
-        )
-    )
-    return fig
-
-
-def compute_auto_y_range(values, *, is_percent: bool = False):
-    """Calcula un rango Y 'inteligente' para resaltar variaciones pequeñas (ej: DISP cerca de 100%)."""
-    s = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
-    if s.empty:
-        return None
-
-    vmin = float(s.min())
-    vmax = float(s.max())
-    span = vmax - vmin
-
-    if is_percent:
-        # Caso típico: valores muy cerca de 1.0 → enfocar (ej: 0.95–1.00)
-        if vmax >= 0.90 and span <= 0.03:
-            lo = max(0.0, vmin - 0.01)
-            hi = min(1.0, vmax + 0.005)
-            # asegurar una ventana mínima visible
-            if (hi - lo) < 0.02:
-                mid = (hi + lo) / 2.0
-                lo = max(0.0, mid - 0.01)
-                hi = min(1.0, mid + 0.01)
-            return [lo, hi]
-
-        # caso general porcentual
-        pad = 0.10 * (span if span > 0 else 0.05)
-        lo = max(0.0, vmin - pad)
-        hi = min(1.0, vmax + pad)
-        return [lo, hi]
-
-    # Métricas generales (horas, conteos)
-    if span == 0:
-        pad = max(1.0, abs(vmax) * 0.10)
-        return [vmin - pad, vmax + pad]
-
-    pad = 0.10 * span
-    lo = vmin - pad
-    hi = vmax + pad
-
-    # si todo es positivo, evita que baje demasiado (mejor lectura)
-    if vmin >= 0:
-        lo = max(0.0, lo)
-
-    return [lo, hi]
-
-
 # =========================================================
 # LOAD
 # =========================================================
@@ -754,83 +831,17 @@ vista_disp = st.sidebar.radio(
 
 min_d = turnos["FECHA"].min()
 max_d = turnos["FECHA"].max()
-
-# ---------------------------------------------------------
-# Selector por AÑOS / MESES (multi-selección) + rango libre
-# ---------------------------------------------------------
-# - En modo "Años/Meses" puedes marcar múltiples años y múltiples meses.
-# - El filtrado es exacto (por año/mes), no por rango continuo.
-# - Se mantiene `date_range` (min/max del filtro) solo como referencia interna.
-date_mode = st.sidebar.radio(
-    "Modo de fechas",
-    ["Años/Meses", "Rango libre"],
-    index=0,
-    key="date_mode",
+date_range = st.sidebar.date_input(
+    "Rango de fechas",
+    value=(min_d.date() if pd.notna(min_d) else None, max_d.date() if pd.notna(max_d) else None),
+    key="date_range",
 )
 
-# Años disponibles según datos
-_years = (
-    turnos.dropna(subset=["FECHA"])["FECHA"].dt.year.dropna().astype(int).unique().tolist()
-    if "FECHA" in turnos.columns else []
-)
-_years = sorted(_years) if _years else []
-default_year = (
-    _years[-1]
-    if _years else (pd.to_datetime(max_d).year if pd.notna(max_d) else pd.Timestamp.today().year)
-)
-
-month_labels = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
-month_map = {label: i + 1 for i, label in enumerate(month_labels)}  # {"Ene":1, ..., "Dic":12}
-
-# Base (sin filtrar por fechas aún)
 df_base = turnos.copy()
-
-if date_mode == "Años/Meses":
-    # Quick toggles
-    all_years = st.sidebar.checkbox("Seleccionar todos los años", value=False, key="all_years")
-    years_default = (_years if all_years else ([default_year] if default_year in _years else (_years[-1:] if _years else [])))
-
-    years_sel = st.sidebar.multiselect(
-        "Años",
-        options=_years if _years else [default_year],
-        default=years_default if years_default else (_years if _years else [default_year]),
-        key="years_sel",
-    )
-
-    all_months = st.sidebar.checkbox("Seleccionar todos los meses", value=True, key="all_months")
-    months_default = (month_labels if all_months else [])
-
-    months_sel = st.sidebar.multiselect(
-        "Meses",
-        options=month_labels,
-        default=months_default,
-        key="months_sel",
-    )
-
-    # Aplicar filtros exactos por año/mes
-    if "FECHA" in df_base.columns and not df_base.empty:
-        if years_sel:
-            df_base = df_base[df_base["FECHA"].dt.year.isin([int(y) for y in years_sel])]
-        if months_sel:
-            df_base = df_base[df_base["FECHA"].dt.month.isin([int(month_map[m]) for m in months_sel])]
-
-    # date_range se conserva como min/max del dataset filtrado
-    if "FECHA" in df_base.columns and not df_base.empty:
-        date_range = (df_base["FECHA"].min().date(), df_base["FECHA"].max().date())
-    else:
-        date_range = (min_d.date() if pd.notna(min_d) else None, max_d.date() if pd.notna(max_d) else None)
-
-else:
-    date_range = st.sidebar.date_input(
-        "Rango de fechas",
-        value=(min_d.date() if pd.notna(min_d) else None, max_d.date() if pd.notna(max_d) else None),
-        key="date_range",
-    )
-
-    if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
-        d1 = pd.to_datetime(date_range[0])
-        d2 = pd.to_datetime(date_range[1])
-        df_base = df_base[(df_base["FECHA"] >= d1) & (df_base["FECHA"] <= d2)]
+if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
+    d1 = pd.to_datetime(date_range[0])
+    d2 = pd.to_datetime(date_range[1])
+    df_base = df_base[(df_base["FECHA"] >= d1) & (df_base["FECHA"] <= d2)]
 
 cult_label_to_val = {"(Todos)": None, "Palto": "PALTO", "Arandano": "ARANDANO"}
 cult_choice = st.sidebar.radio("Cultivo", ["(Todos)", "Palto", "Arandano"], index=0, key="cult_btn")
@@ -1018,225 +1029,102 @@ if page == "Dashboard":
     # =========================================================
     st.subheader("Evolución por mes-año (MTTR, MTBF, Disponibilidad, Fallas, TO y Down Time)")
 
-    with st.expander("⚙️ Opciones de gráficos", expanded=False):
-        show_trend = st.checkbox("Mostrar línea de tendencia (regresión lineal)", value=True, key="show_trend")
-        auto_zoom_y = st.checkbox("Auto-zoom del eje Y", value=True, key="auto_zoom_y")
-
-        st.markdown("**Rango Y manual (opcional)**")
-        cyr1, cyr2, cyr3 = st.columns(3)
-        with cyr1:
-            use_manual_y_disp = st.checkbox("Disponibilidad: rango manual", value=False, key="use_manual_y_disp")
-            disp_ymin_pct = st.number_input("DISP Y mín (%)", min_value=0.0, max_value=100.0, value=95.0, step=0.5, key="disp_ymin_pct")
-            disp_ymax_pct = st.number_input("DISP Y máx (%)", min_value=0.0, max_value=100.0, value=100.0, step=0.5, key="disp_ymax_pct")
-        with cyr2:
-            use_manual_y_mttr = st.checkbox("MTTR: rango manual", value=False, key="use_manual_y_mttr")
-            mttr_ymin = st.number_input("MTTR Y mín (h)", value=0.0, step=0.1, key="mttr_ymin")
-            mttr_ymax = st.number_input("MTTR Y máx (h)", value=5.0, step=0.1, key="mttr_ymax")
-        with cyr3:
-            use_manual_y_mtbf = st.checkbox("MTBF: rango manual", value=False, key="use_manual_y_mtbf")
-            mtbf_ymin = st.number_input("MTBF Y mín (h)", value=0.0, step=10.0, key="mtbf_ymin")
-            mtbf_ymax = st.number_input("MTBF Y máx (h)", value=500.0, step=10.0, key="mtbf_ymax")
-
-        cyr4, cyr5, cyr6 = st.columns(3)
-        with cyr4:
-            use_manual_y_fallas = st.checkbox("Fallas: rango manual", value=False, key="use_manual_y_fallas")
-            fallas_ymin = st.number_input("Fallas Y mín", min_value=0.0, value=0.0, step=1.0, key="fallas_ymin")
-            fallas_ymax = st.number_input("Fallas Y máx", min_value=0.0, value=50.0, step=1.0, key="fallas_ymax")
-        with cyr5:
-            use_manual_y_to = st.checkbox("TO: rango manual", value=False, key="use_manual_y_to")
-            to_ymin = st.number_input("TO Y mín (h)", min_value=0.0, value=0.0, step=50.0, key="to_ymin")
-            to_ymax = st.number_input("TO Y máx (h)", min_value=0.0, value=3000.0, step=50.0, key="to_ymax")
-        with cyr6:
-            use_manual_y_dt = st.checkbox("DT: rango manual", value=False, key="use_manual_y_dt")
-            dt_ymin = st.number_input("DT Y mín (h)", min_value=0.0, value=0.0, step=10.0, key="dt_ymin")
-            dt_ymax = st.number_input("DT Y máx (h)", min_value=0.0, value=500.0, step=10.0, key="dt_ymax")
-
-        st.markdown("**Metas por año (línea de referencia)**")
-        st.caption("Define la meta por año. El gráfico dibuja una línea adicional (Meta) según el año de cada mes.")
-        # Inicializa tabla de metas con los años presentes en el rango actual (si existe)
-        years_default = []
-        if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
-            try:
-                y1 = pd.to_datetime(date_range[0]).year
-                y2 = pd.to_datetime(date_range[1]).year
-                years_default = list(range(min(y1, y2), max(y1, y2) + 1))
-            except Exception:
-                years_default = []
-        if not years_default:
-            years_default = sorted({pd.Timestamp.today().year})
-
-        if "kpi_targets_by_year" not in st.session_state:
-            st.session_state["kpi_targets_by_year"] = pd.DataFrame(
-                {
-                    "ANIO": years_default,
-                    "META_DISP_%": [np.nan] * len(years_default),
-                    "META_MTTR_HR": [np.nan] * len(years_default),
-                    "META_MTBF_HR": [np.nan] * len(years_default),
-                    "META_FALLAS": [np.nan] * len(years_default),
-                    "META_TO_HR": [np.nan] * len(years_default),
-                    "META_DT_HR": [np.nan] * len(years_default),
-                }
-            )
-
-        targets_df = st.data_editor(
-            st.session_state["kpi_targets_by_year"],
-            num_rows="dynamic",
-            use_container_width=True,
-            key="targets_editor",
-        )
-        st.session_state["kpi_targets_by_year"] = targets_df
-
-    # ------------------------------
-    # Construye base filtrada
-    # ------------------------------
-    base_turnos = turnos.copy()
+    base = turnos.copy()
 
     if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
         d1 = pd.to_datetime(date_range[0])
         d2 = pd.to_datetime(date_range[1])
-        base_turnos = base_turnos[(base_turnos["FECHA"] >= d1) & (base_turnos["FECHA"] <= d2)]
+        base = base[(base["FECHA"] >= d1) & (base["FECHA"] <= d2)]
 
     if cult_sel:
-        base_turnos = base_turnos[base_turnos["CULTIVO"] == cult_sel]
+        base = base[base["CULTIVO"] == cult_sel]
     if turn_sel:
-        base_turnos = base_turnos[base_turnos["TURNO_NORM"] == turn_sel]
+        base = base[base["TURNO_NORM"] == turn_sel]
     if trc_sel != "(Todos)":
-        base_turnos = base_turnos[base_turnos["ID_TRACTOR"].astype(str) == str(trc_sel)]
+        base = base[base["ID_TRACTOR"].astype(str) == str(trc_sel)]
     if imp_sel != "(Todos)":
-        base_turnos = base_turnos[base_turnos["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
+        base = base[base["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
     if id_proceso_sel is not None:
-        base_turnos = base_turnos[base_turnos["ID_PROCESO"].astype(str) == str(id_proceso_sel)]
+        base = base[base["ID_PROCESO"].astype(str) == str(id_proceso_sel)]
 
-    if base_turnos.empty:
+    if base.empty:
         st.info("Con los filtros actuales, no hay datos para construir la evolución mensual.")
     else:
-        # Months_back estimado desde el rango (si existe) para cubrir todo lo seleccionado
-        months_back = 12
-        if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
-            try:
-                d1 = pd.to_datetime(date_range[0]).to_period("M")
-                d2 = pd.to_datetime(date_range[1]).to_period("M")
-                months_back = int(abs((d2 - d1).n)) + 1
-                months_back = max(months_back, 3)
-                months_back = min(months_back, 60)
-            except Exception:
-                months_back = 12
+        base = base.copy()
+        base["MES"] = base["FECHA"].dt.to_period("M").astype(str)
+        ids = set(base["ID_TURNO"].astype(str).tolist())
 
-        evo = trend_12m_monthly_kpis(
-            base_turnos,
-            horometros,
-            eventos,
-            vista_disp=vista_disp,
-            cult_sel=cult_sel,
-            turn_sel=turn_sel,
-            trc_sel=trc_sel,
-            imp_sel=imp_sel,
-            id_proceso_sel=id_proceso_sel,
-            months_back=months_back,
-        )
+        h = horometros[horometros["ID_TURNO"].astype(str).isin(ids)].copy()
+        e = eventos[eventos["ID_TURNO"].astype(str).isin(ids)].copy()
 
-        if evo is None or evo.empty:
-            st.info("No se pudo construir la evolución mensual con los filtros actuales.")
+        e = e[e["CATEGORIA_EVENTO"].astype(str).str.upper() == "FALLA"].copy()
+        e["DT_HR"] = pd.to_numeric(e["DT_MIN"], errors="coerce") / 60.0
+
+        turn_mes = base[["ID_TURNO", "MES", "ID_TRACTOR", "ID_IMPLEMENTO"]].copy()
+        turn_mes["ID_TURNO"] = turn_mes["ID_TURNO"].astype(str)
+
+        h2 = h.merge(turn_mes[["ID_TURNO", "MES"]], on="ID_TURNO", how="left")
+
+        if vista_disp == "Tractor":
+            h2 = h2[h2["TIPO_EQUIPO"].astype(str).str.upper() == "TRACTOR"].copy()
+        elif vista_disp == "Implemento":
+            h2 = h2[h2["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
         else:
-            # targets map
-            tdf = st.session_state.get("kpi_targets_by_year", pd.DataFrame()).copy()
-            if not tdf.empty and "ANIO" in tdf.columns:
-                tdf["ANIO"] = pd.to_numeric(tdf["ANIO"], errors="coerce").astype("Int64")
-            targets_map = {}
-            for col in ["META_DISP_%", "META_MTTR_HR", "META_MTBF_HR", "META_FALLAS", "META_TO_HR", "META_DT_HR"]:
-                if col in tdf.columns:
-                    targets_map[col] = {int(y): float(v) for y, v in zip(tdf["ANIO"].dropna().astype(int), pd.to_numeric(tdf[col], errors="coerce"))}
+            h2 = h2[h2["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
 
-            def _apply_y(fig: go.Figure, series, *, is_percent: bool, manual_on: bool, manual_min: float, manual_max: float):
-                if manual_on and manual_max > manual_min:
-                    fig.update_yaxes(range=[manual_min, manual_max])
-                    return fig
-                if auto_zoom_y:
-                    yr = compute_auto_y_range(series, is_percent=is_percent)
-                    if yr is not None:
-                        fig.update_yaxes(range=yr)
-                return fig
+        to_mes = h2.groupby("MES", dropna=True)["TO_HORO"].sum().reset_index(name="TO_HR")
 
-            def _add_target(fig: go.Figure, x_labels, mes_series, *, target_key: str, is_percent: bool, name: str = "Meta"):
-                mp = targets_map.get(target_key, {})
-                if not mp:
-                    return fig
-                y_meta = []
-                for mes in mes_series.astype(str).tolist():
-                    try:
-                        yy = int(str(mes).split("-")[0])
-                    except Exception:
-                        yy = None
-                    val = mp.get(yy, np.nan) if yy is not None else np.nan
-                    if is_percent and pd.notna(val):
-                        val = float(val) / 100.0  # metas DISP en %
-                    y_meta.append(val)
-                if pd.Series(y_meta).notna().sum() < 1:
-                    return fig
-                fig.add_trace(go.Scatter(x=list(x_labels), y=y_meta, mode="lines", name=name))
-                return fig
+        e2 = e.merge(turn_mes, on="ID_TURNO", how="left")
 
-            # ------------------------------
-            # Gráficos
-            # ------------------------------
-            r1c1, r1c2 = st.columns(2)
-            with r1c1:
-                fig1 = px.bar(evo, x="MES", y="MTTR_HR", title="MTTR (h/falla) por mes")
-                fig1.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-                if show_trend:
-                    add_linear_trendline(fig1, evo["MES"], evo["MTTR_HR"], name="Tendencia")
-                _add_target(fig1, evo["MES"], evo["MES"], target_key="META_MTTR_HR", is_percent=False, name="Meta")
-                _apply_y(fig1, evo["MTTR_HR"], is_percent=False, manual_on=use_manual_y_mttr, manual_min=mttr_ymin, manual_max=mttr_ymax)
-                st.plotly_chart(fig1, width="stretch")
+        if vista_disp == "Tractor":
+            trcs = base["ID_TRACTOR"].dropna().astype(str).unique().tolist()
+            e2 = e2[e2["ID_EQUIPO_AFECTADO"].astype(str).isin(trcs)]
+        elif vista_disp == "Implemento":
+            imps = base["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist()
+            e2 = e2[e2["ID_EQUIPO_AFECTADO"].astype(str).isin(imps)]
 
-            with r1c2:
-                fig2 = px.bar(evo, x="MES", y="MTBF_HR", title="MTBF (h/falla) por mes")
-                fig2.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-                if show_trend:
-                    add_linear_trendline(fig2, evo["MES"], evo["MTBF_HR"], name="Tendencia")
-                _add_target(fig2, evo["MES"], evo["MES"], target_key="META_MTBF_HR", is_percent=False, name="Meta")
-                _apply_y(fig2, evo["MTBF_HR"], is_percent=False, manual_on=use_manual_y_mtbf, manual_min=mtbf_ymin, manual_max=mtbf_ymax)
-                st.plotly_chart(fig2, width="stretch")
+        dt_mes = e2.groupby("MES", dropna=True).agg(
+            DT_HR=("DT_HR", "sum"),
+            FALLAS=("DT_HR", "size")
+        ).reset_index()
 
-            r2c1, r2c2 = st.columns(2)
-            with r2c1:
-                fig3 = px.bar(evo, x="MES", y="DISP", title="Disponibilidad (TO/(TO+DT)) por mes")
-                fig3.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20), yaxis_tickformat=".0%")
-                if show_trend:
-                    add_linear_trendline(fig3, evo["MES"], evo["DISP"], name="Tendencia")
-                _add_target(fig3, evo["MES"], evo["MES"], target_key="META_DISP_%", is_percent=True, name="Meta")
-                # Manual DISP en %
-                _apply_y(fig3, evo["DISP"], is_percent=True, manual_on=use_manual_y_disp,
-                         manual_min=disp_ymin_pct / 100.0, manual_max=disp_ymax_pct / 100.0)
-                st.plotly_chart(fig3, width="stretch")
+        evo = to_mes.merge(dt_mes, on="MES", how="left").fillna({"DT_HR": 0.0, "FALLAS": 0})
+        evo["FALLAS"] = evo["FALLAS"].astype(int)
 
-            with r2c2:
-                fig4 = px.bar(evo, x="MES", y="FALLAS", title="Cantidad de fallas por mes")
-                fig4.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-                if show_trend:
-                    add_linear_trendline(fig4, evo["MES"], evo["FALLAS"], name="Tendencia")
-                _add_target(fig4, evo["MES"], evo["MES"], target_key="META_FALLAS", is_percent=False, name="Meta")
-                _apply_y(fig4, evo["FALLAS"], is_percent=False, manual_on=use_manual_y_fallas, manual_min=fallas_ymin, manual_max=fallas_ymax)
-                st.plotly_chart(fig4, width="stretch")
+        evo["MTTR_HR"] = np.where(evo["FALLAS"] > 0, evo["DT_HR"] / evo["FALLAS"], np.nan)
+        evo["MTBF_HR"] = np.where(evo["FALLAS"] > 0, evo["TO_HR"] / evo["FALLAS"], np.nan)
+        evo["DISP"] = np.where((evo["TO_HR"] + evo["DT_HR"]) > 0, evo["TO_HR"] / (evo["TO_HR"] + evo["DT_HR"]), np.nan)
+        evo = evo.sort_values("MES", ascending=True)
 
-            r3c1, r3c2 = st.columns(2)
-            with r3c1:
-                fig5 = px.bar(evo, x="MES", y="TO_HR", title="Tiempo de Operación (TO) por mes (h)")
-                fig5.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-                if show_trend:
-                    add_linear_trendline(fig5, evo["MES"], evo["TO_HR"], name="Tendencia")
-                _add_target(fig5, evo["MES"], evo["MES"], target_key="META_TO_HR", is_percent=False, name="Meta")
-                _apply_y(fig5, evo["TO_HR"], is_percent=False, manual_on=use_manual_y_to, manual_min=to_ymin, manual_max=to_ymax)
-                st.plotly_chart(fig5, width="stretch")
+        r1c1, r1c2 = st.columns(2)
+        with r1c1:
+            fig1 = px.bar(evo, x="MES", y="MTTR_HR", title="MTTR (h/falla) por mes")
+            fig1.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
+            st.plotly_chart(fig1, width="stretch")
+        with r1c2:
+            fig2 = px.bar(evo, x="MES", y="MTBF_HR", title="MTBF (h/falla) por mes")
+            fig2.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
+            st.plotly_chart(fig2, width="stretch")
 
-            with r3c2:
-                fig6 = px.bar(evo, x="MES", y="DT_HR", title="Down Time por mes (h)")
-                fig6.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-                if show_trend:
-                    add_linear_trendline(fig6, evo["MES"], evo["DT_HR"], name="Tendencia")
-                _add_target(fig6, evo["MES"], evo["MES"], target_key="META_DT_HR", is_percent=False, name="Meta")
-                _apply_y(fig6, evo["DT_HR"], is_percent=False, manual_on=use_manual_y_dt, manual_min=dt_ymin, manual_max=dt_ymax)
-                st.plotly_chart(fig6, width="stretch")
+        r2c1, r2c2 = st.columns(2)
+        with r2c1:
+            fig3 = px.bar(evo, x="MES", y="DISP", title="Disponibilidad (TO/(TO+DT)) por mes")
+            fig3.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20), yaxis_tickformat=".0%")
+            st.plotly_chart(fig3, width="stretch")
+        with r2c2:
+            fig4 = px.bar(evo, x="MES", y="FALLAS", title="Cantidad de fallas por mes")
+            fig4.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
+            st.plotly_chart(fig4, width="stretch")
+
+        r3c1, r3c2 = st.columns(2)
+        with r3c1:
+            fig5 = px.bar(evo, x="MES", y="TO_HR", title="Tiempo de Operación (TO) por mes (h)")
+            fig5.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
+            st.plotly_chart(fig5, width="stretch")
+        with r3c2:
+            fig6 = px.bar(evo, x="MES", y="DT_HR", title="Down Time por mes (h)")
+            fig6.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
+            st.plotly_chart(fig6, width="stretch")
 
     st.subheader("Descargar datos filtrados")
     st.download_button(
@@ -1265,6 +1153,81 @@ if page == "Dashboard":
             mime="text/csv",
         )
 
+
+    
+
+    # =========================================================
+    # MENSAJE EJECUTIVO AUTOMÁTICO (Dashboard)
+    # =========================================================
+    st.divider()
+    st.subheader("📌 Mensaje Ejecutivo – Confiabilidad Operacional")
+
+    filtros_txt = (
+        f"Vista: {vista_disp}\n"
+        f"Rango fechas (UI): {date_range}\n"
+        f"Cultivo: {cult_choice} | Turno: {turn_choice}\n"
+        f"Propietario: {prop_sel} | Familia: {fam_sel}\n"
+        f"Tractor: {trc_sel} | Implemento: {imp_sel}\n"
+        f"Proceso: {proc_name_sel}"
+    )
+
+    kpis_exec = {
+        "TO": to_base,
+        "DT": dt_base,
+        "FALLAS": n_base,
+        "MTTR": mttr_hr,
+        "MTBF": mtbf_hr,
+        "DISP": disp,
+    }
+
+    evo12_msg = trend_12m_monthly_kpis(
+        turnos=turnos, horometros=horometros, eventos=eventos,
+        vista_disp=vista_disp,
+        cult_sel=cult_sel, turn_sel=turn_sel,
+        trc_sel=trc_sel, imp_sel=imp_sel,
+        id_proceso_sel=id_proceso_sel,
+        eq_sel=None,
+        months_back=12,
+    )
+
+    pareto_df = None
+    pareto_dim = "SUBUNIDAD"
+    if fd_sel is not None and isinstance(fd_sel, pd.DataFrame) and not fd_sel.empty:
+        fd_ctx2 = norm_cols(fd_sel.copy())
+        if "DOWNTIME_HR" not in fd_ctx2.columns:
+            tf2 = find_first_col(fd_ctx2, ["T_FALLA","TFALLA","TIEMPO_FALLA","TIEMPO_DE_FALLA","DOWNTIME","DT_HR"])
+            if tf2 is not None:
+                fd_ctx2["DOWNTIME_HR"] = _coerce_downtime_to_hr(fd_ctx2[tf2])
+        fd_ctx2["DOWNTIME_HR"] = pd.to_numeric(fd_ctx2.get("DOWNTIME_HR", 0.0), errors="coerce").fillna(0.0)
+
+        if "SUBUNIDAD" in fd_ctx2.columns:
+            pareto_dim = "SUBUNIDAD"
+            pareto_df = fd_ctx2[[pareto_dim, "DOWNTIME_HR"]].copy()
+        elif "COMPONENTE" in fd_ctx2.columns:
+            pareto_dim = "COMPONENTE"
+            pareto_df = fd_ctx2[[pareto_dim, "DOWNTIME_HR"]].copy()
+
+    # Metas opcionales: si no defines metas, se usa baseline 6M (promedio) como referencia
+    metas_exec = {}
+    # Ejemplo:
+    # metas_exec = {"DISP": 0.96, "MTTR": 2.5, "MTBF": 120.0}
+
+    ctx_exec = build_exec_context(
+        filtros_txt=filtros_txt,
+        kpis=kpis_exec,
+        trend_monthly=evo12_msg if isinstance(evo12_msg, pd.DataFrame) else None,
+        pareto_df=pareto_df,
+        pareto_group_col=pareto_dim,
+        pareto_value_col="DOWNTIME_HR",
+        metas=metas_exec,
+    )
+
+    if client is None:
+        st.info("Configura **OPENAI_API_KEY** en Secrets para habilitar el Mensaje Ejecutivo automático.")
+    else:
+        model_name = st.secrets.get("OPENAI_MODEL", "gpt-4o-mini")
+        msg_exec = generate_exec_message(client, model_name, ctx_exec).strip()
+        st.info(msg_exec if msg_exec else "No se pudo generar el mensaje ejecutivo con el contexto actual.")
 
     st.divider()
     # -------------------------
@@ -1683,7 +1646,7 @@ else:  # page == "Técnico"
     st.subheader("3) Análisis de fallas por nivel (barras)")
 
     def bar_fallas(df_in, col, title, top=15):
-        if col is None or col not in df_in.columns:
+        if df_in is None or df_in.empty or col is None or col not in df_in.columns:
             return None
         g = df_in.groupby(col, dropna=True).size().reset_index(name="FALLAS")
         g[col] = g[col].astype(str)
@@ -1694,31 +1657,18 @@ else:  # page == "Técnico"
         fig.update_layout(title_x=0.5, margin=dict(l=10, r=10, t=50, b=10), yaxis_title="")
         return fig
 
-    top_barras = st.slider(
-        "Top por gráfico",
-        min_value=5, max_value=30, value=15, step=1,
-        key="tec_top_barras",
-    )
+    top_barras = st.slider("Top por gráfico", min_value=5, max_value=30, value=15, step=1, key="tec_top_barras")
 
     bc1, bc2, bc3 = st.columns(3)
     with bc1:
         fig = bar_fallas(df_lvl, sistema_col, "Fallas por Sub unidad", top=top_barras)
-        if fig is not None:
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Sin datos para Sub unidad.")
+        st.plotly_chart(fig, use_container_width=True) if fig else st.info("Sin datos para Sub unidad.")
     with bc2:
         fig = bar_fallas(df_lvl, comp_col, "Fallas por Componente", top=top_barras)
-        if fig is not None:
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Sin datos para Componente.")
+        st.plotly_chart(fig, use_container_width=True) if fig else st.info("Sin datos para Componente.")
     with bc3:
         fig = bar_fallas(df_lvl, parte_col, "Fallas por Parte", top=top_barras)
-        if fig is not None:
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Sin datos para Parte.")
+        st.plotly_chart(fig, use_container_width=True) if fig else st.info("Sin datos para Parte.")
 
     st.divider()
 
