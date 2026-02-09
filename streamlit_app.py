@@ -1018,150 +1018,225 @@ if page == "Dashboard":
     # =========================================================
     st.subheader("Evolución por mes-año (MTTR, MTBF, Disponibilidad, Fallas, TO y Down Time)")
 
+    with st.expander("⚙️ Opciones de gráficos", expanded=False):
+        show_trend = st.checkbox("Mostrar línea de tendencia (regresión lineal)", value=True, key="show_trend")
+        auto_zoom_y = st.checkbox("Auto-zoom del eje Y", value=True, key="auto_zoom_y")
 
-with st.expander("⚙️ Opciones de gráficos", expanded=False):
-    show_trend = st.checkbox("Mostrar línea de tendencia (regresión lineal)", value=True, key="show_trend")
-    auto_zoom_y = st.checkbox("Auto-zoom del eje Y (mejor para series cerca a 100%)", value=True, key="auto_zoom_y")
+        st.markdown("**Rango Y manual (opcional)**")
+        cyr1, cyr2, cyr3 = st.columns(3)
+        with cyr1:
+            use_manual_y_disp = st.checkbox("Disponibilidad: rango manual", value=False, key="use_manual_y_disp")
+            disp_ymin_pct = st.number_input("DISP Y mín (%)", min_value=0.0, max_value=100.0, value=95.0, step=0.5, key="disp_ymin_pct")
+            disp_ymax_pct = st.number_input("DISP Y máx (%)", min_value=0.0, max_value=100.0, value=100.0, step=0.5, key="disp_ymax_pct")
+        with cyr2:
+            use_manual_y_mttr = st.checkbox("MTTR: rango manual", value=False, key="use_manual_y_mttr")
+            mttr_ymin = st.number_input("MTTR Y mín (h)", value=0.0, step=0.1, key="mttr_ymin")
+            mttr_ymax = st.number_input("MTTR Y máx (h)", value=5.0, step=0.1, key="mttr_ymax")
+        with cyr3:
+            use_manual_y_mtbf = st.checkbox("MTBF: rango manual", value=False, key="use_manual_y_mtbf")
+            mtbf_ymin = st.number_input("MTBF Y mín (h)", value=0.0, step=10.0, key="mtbf_ymin")
+            mtbf_ymax = st.number_input("MTBF Y máx (h)", value=500.0, step=10.0, key="mtbf_ymax")
 
+        cyr4, cyr5, cyr6 = st.columns(3)
+        with cyr4:
+            use_manual_y_fallas = st.checkbox("Fallas: rango manual", value=False, key="use_manual_y_fallas")
+            fallas_ymin = st.number_input("Fallas Y mín", min_value=0.0, value=0.0, step=1.0, key="fallas_ymin")
+            fallas_ymax = st.number_input("Fallas Y máx", min_value=0.0, value=50.0, step=1.0, key="fallas_ymax")
+        with cyr5:
+            use_manual_y_to = st.checkbox("TO: rango manual", value=False, key="use_manual_y_to")
+            to_ymin = st.number_input("TO Y mín (h)", min_value=0.0, value=0.0, step=50.0, key="to_ymin")
+            to_ymax = st.number_input("TO Y máx (h)", min_value=0.0, value=3000.0, step=50.0, key="to_ymax")
+        with cyr6:
+            use_manual_y_dt = st.checkbox("DT: rango manual", value=False, key="use_manual_y_dt")
+            dt_ymin = st.number_input("DT Y mín (h)", min_value=0.0, value=0.0, step=10.0, key="dt_ymin")
+            dt_ymax = st.number_input("DT Y máx (h)", min_value=0.0, value=500.0, step=10.0, key="dt_ymax")
 
-    base = turnos.copy()
+        st.markdown("**Metas por año (línea de referencia)**")
+        st.caption("Define la meta por año. El gráfico dibuja una línea adicional (Meta) según el año de cada mes.")
+        # Inicializa tabla de metas con los años presentes en el rango actual (si existe)
+        years_default = []
+        if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
+            try:
+                y1 = pd.to_datetime(date_range[0]).year
+                y2 = pd.to_datetime(date_range[1]).year
+                years_default = list(range(min(y1, y2), max(y1, y2) + 1))
+            except Exception:
+                years_default = []
+        if not years_default:
+            years_default = sorted({pd.Timestamp.today().year})
+
+        if "kpi_targets_by_year" not in st.session_state:
+            st.session_state["kpi_targets_by_year"] = pd.DataFrame(
+                {
+                    "ANIO": years_default,
+                    "META_DISP_%": [np.nan] * len(years_default),
+                    "META_MTTR_HR": [np.nan] * len(years_default),
+                    "META_MTBF_HR": [np.nan] * len(years_default),
+                    "META_FALLAS": [np.nan] * len(years_default),
+                    "META_TO_HR": [np.nan] * len(years_default),
+                    "META_DT_HR": [np.nan] * len(years_default),
+                }
+            )
+
+        targets_df = st.data_editor(
+            st.session_state["kpi_targets_by_year"],
+            num_rows="dynamic",
+            use_container_width=True,
+            key="targets_editor",
+        )
+        st.session_state["kpi_targets_by_year"] = targets_df
+
+    # ------------------------------
+    # Construye base filtrada
+    # ------------------------------
+    base_turnos = turnos.copy()
 
     if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
         d1 = pd.to_datetime(date_range[0])
         d2 = pd.to_datetime(date_range[1])
-        base = base[(base["FECHA"] >= d1) & (base["FECHA"] <= d2)]
+        base_turnos = base_turnos[(base_turnos["FECHA"] >= d1) & (base_turnos["FECHA"] <= d2)]
 
     if cult_sel:
-        base = base[base["CULTIVO"] == cult_sel]
+        base_turnos = base_turnos[base_turnos["CULTIVO"] == cult_sel]
     if turn_sel:
-        base = base[base["TURNO_NORM"] == turn_sel]
+        base_turnos = base_turnos[base_turnos["TURNO_NORM"] == turn_sel]
     if trc_sel != "(Todos)":
-        base = base[base["ID_TRACTOR"].astype(str) == str(trc_sel)]
+        base_turnos = base_turnos[base_turnos["ID_TRACTOR"].astype(str) == str(trc_sel)]
     if imp_sel != "(Todos)":
-        base = base[base["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
+        base_turnos = base_turnos[base_turnos["ID_IMPLEMENTO"].astype(str) == str(imp_sel)]
     if id_proceso_sel is not None:
-        base = base[base["ID_PROCESO"].astype(str) == str(id_proceso_sel)]
+        base_turnos = base_turnos[base_turnos["ID_PROCESO"].astype(str) == str(id_proceso_sel)]
 
-    if base.empty:
+    if base_turnos.empty:
         st.info("Con los filtros actuales, no hay datos para construir la evolución mensual.")
     else:
-        base = base.copy()
-        base["MES"] = base["FECHA"].dt.to_period("M").astype(str)
-        ids = set(base["ID_TURNO"].astype(str).tolist())
+        # Months_back estimado desde el rango (si existe) para cubrir todo lo seleccionado
+        months_back = 12
+        if isinstance(date_range, tuple) and len(date_range) == 2 and all(date_range):
+            try:
+                d1 = pd.to_datetime(date_range[0]).to_period("M")
+                d2 = pd.to_datetime(date_range[1]).to_period("M")
+                months_back = int(abs((d2 - d1).n)) + 1
+                months_back = max(months_back, 3)
+                months_back = min(months_back, 60)
+            except Exception:
+                months_back = 12
 
-        h = horometros[horometros["ID_TURNO"].astype(str).isin(ids)].copy()
-        e = eventos[eventos["ID_TURNO"].astype(str).isin(ids)].copy()
+        evo = trend_12m_monthly_kpis(
+            base_turnos,
+            horometros,
+            eventos,
+            vista_disp=vista_disp,
+            cult_sel=cult_sel,
+            turn_sel=turn_sel,
+            trc_sel=trc_sel,
+            imp_sel=imp_sel,
+            id_proceso_sel=id_proceso_sel,
+            months_back=months_back,
+        )
 
-        e = e[e["CATEGORIA_EVENTO"].astype(str).str.upper() == "FALLA"].copy()
-        e["DT_HR"] = pd.to_numeric(e["DT_MIN"], errors="coerce") / 60.0
-
-        turn_mes = base[["ID_TURNO", "MES", "ID_TRACTOR", "ID_IMPLEMENTO"]].copy()
-        turn_mes["ID_TURNO"] = turn_mes["ID_TURNO"].astype(str)
-
-        h2 = h.merge(turn_mes[["ID_TURNO", "MES"]], on="ID_TURNO", how="left")
-
-        if vista_disp == "Tractor":
-            h2 = h2[h2["TIPO_EQUIPO"].astype(str).str.upper() == "TRACTOR"].copy()
-        elif vista_disp == "Implemento":
-            h2 = h2[h2["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
+        if evo is None or evo.empty:
+            st.info("No se pudo construir la evolución mensual con los filtros actuales.")
         else:
-            h2 = h2[h2["TIPO_EQUIPO"].astype(str).str.upper() == "IMPLEMENTO"].copy()
+            # targets map
+            tdf = st.session_state.get("kpi_targets_by_year", pd.DataFrame()).copy()
+            if not tdf.empty and "ANIO" in tdf.columns:
+                tdf["ANIO"] = pd.to_numeric(tdf["ANIO"], errors="coerce").astype("Int64")
+            targets_map = {}
+            for col in ["META_DISP_%", "META_MTTR_HR", "META_MTBF_HR", "META_FALLAS", "META_TO_HR", "META_DT_HR"]:
+                if col in tdf.columns:
+                    targets_map[col] = {int(y): float(v) for y, v in zip(tdf["ANIO"].dropna().astype(int), pd.to_numeric(tdf[col], errors="coerce"))}
 
-        to_mes = h2.groupby("MES", dropna=True)["TO_HORO"].sum().reset_index(name="TO_HR")
+            def _apply_y(fig: go.Figure, series, *, is_percent: bool, manual_on: bool, manual_min: float, manual_max: float):
+                if manual_on and manual_max > manual_min:
+                    fig.update_yaxes(range=[manual_min, manual_max])
+                    return fig
+                if auto_zoom_y:
+                    yr = compute_auto_y_range(series, is_percent=is_percent)
+                    if yr is not None:
+                        fig.update_yaxes(range=yr)
+                return fig
 
-        e2 = e.merge(turn_mes, on="ID_TURNO", how="left")
+            def _add_target(fig: go.Figure, x_labels, mes_series, *, target_key: str, is_percent: bool, name: str = "Meta"):
+                mp = targets_map.get(target_key, {})
+                if not mp:
+                    return fig
+                y_meta = []
+                for mes in mes_series.astype(str).tolist():
+                    try:
+                        yy = int(str(mes).split("-")[0])
+                    except Exception:
+                        yy = None
+                    val = mp.get(yy, np.nan) if yy is not None else np.nan
+                    if is_percent and pd.notna(val):
+                        val = float(val) / 100.0  # metas DISP en %
+                    y_meta.append(val)
+                if pd.Series(y_meta).notna().sum() < 1:
+                    return fig
+                fig.add_trace(go.Scatter(x=list(x_labels), y=y_meta, mode="lines", name=name))
+                return fig
 
-        if vista_disp == "Tractor":
-            trcs = base["ID_TRACTOR"].dropna().astype(str).unique().tolist()
-            e2 = e2[e2["ID_EQUIPO_AFECTADO"].astype(str).isin(trcs)]
-        elif vista_disp == "Implemento":
-            imps = base["ID_IMPLEMENTO"].dropna().astype(str).unique().tolist()
-            e2 = e2[e2["ID_EQUIPO_AFECTADO"].astype(str).isin(imps)]
+            # ------------------------------
+            # Gráficos
+            # ------------------------------
+            r1c1, r1c2 = st.columns(2)
+            with r1c1:
+                fig1 = px.bar(evo, x="MES", y="MTTR_HR", title="MTTR (h/falla) por mes")
+                fig1.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
+                if show_trend:
+                    add_linear_trendline(fig1, evo["MES"], evo["MTTR_HR"], name="Tendencia")
+                _add_target(fig1, evo["MES"], evo["MES"], target_key="META_MTTR_HR", is_percent=False, name="Meta")
+                _apply_y(fig1, evo["MTTR_HR"], is_percent=False, manual_on=use_manual_y_mttr, manual_min=mttr_ymin, manual_max=mttr_ymax)
+                st.plotly_chart(fig1, width="stretch")
 
-        dt_mes = e2.groupby("MES", dropna=True).agg(
-            DT_HR=("DT_HR", "sum"),
-            FALLAS=("DT_HR", "size")
-        ).reset_index()
+            with r1c2:
+                fig2 = px.bar(evo, x="MES", y="MTBF_HR", title="MTBF (h/falla) por mes")
+                fig2.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
+                if show_trend:
+                    add_linear_trendline(fig2, evo["MES"], evo["MTBF_HR"], name="Tendencia")
+                _add_target(fig2, evo["MES"], evo["MES"], target_key="META_MTBF_HR", is_percent=False, name="Meta")
+                _apply_y(fig2, evo["MTBF_HR"], is_percent=False, manual_on=use_manual_y_mtbf, manual_min=mtbf_ymin, manual_max=mtbf_ymax)
+                st.plotly_chart(fig2, width="stretch")
 
-        evo = to_mes.merge(dt_mes, on="MES", how="left").fillna({"DT_HR": 0.0, "FALLAS": 0})
-        evo["FALLAS"] = evo["FALLAS"].astype(int)
+            r2c1, r2c2 = st.columns(2)
+            with r2c1:
+                fig3 = px.bar(evo, x="MES", y="DISP", title="Disponibilidad (TO/(TO+DT)) por mes")
+                fig3.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20), yaxis_tickformat=".0%")
+                if show_trend:
+                    add_linear_trendline(fig3, evo["MES"], evo["DISP"], name="Tendencia")
+                _add_target(fig3, evo["MES"], evo["MES"], target_key="META_DISP_%", is_percent=True, name="Meta")
+                # Manual DISP en %
+                _apply_y(fig3, evo["DISP"], is_percent=True, manual_on=use_manual_y_disp,
+                         manual_min=disp_ymin_pct / 100.0, manual_max=disp_ymax_pct / 100.0)
+                st.plotly_chart(fig3, width="stretch")
 
-        evo["MTTR_HR"] = np.where(evo["FALLAS"] > 0, evo["DT_HR"] / evo["FALLAS"], np.nan)
-        evo["MTBF_HR"] = np.where(evo["FALLAS"] > 0, evo["TO_HR"] / evo["FALLAS"], np.nan)
-        evo["DISP"] = np.where((evo["TO_HR"] + evo["DT_HR"]) > 0, evo["TO_HR"] / (evo["TO_HR"] + evo["DT_HR"]), np.nan)
-        evo = evo.sort_values("MES", ascending=True)
+            with r2c2:
+                fig4 = px.bar(evo, x="MES", y="FALLAS", title="Cantidad de fallas por mes")
+                fig4.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
+                if show_trend:
+                    add_linear_trendline(fig4, evo["MES"], evo["FALLAS"], name="Tendencia")
+                _add_target(fig4, evo["MES"], evo["MES"], target_key="META_FALLAS", is_percent=False, name="Meta")
+                _apply_y(fig4, evo["FALLAS"], is_percent=False, manual_on=use_manual_y_fallas, manual_min=fallas_ymin, manual_max=fallas_ymax)
+                st.plotly_chart(fig4, width="stretch")
 
-        r1c1, r1c2 = st.columns(2)
-        with r1c1:
-            fig1 = px.bar(evo, x="MES", y="MTTR_HR", title="MTTR (h/falla) por mes")
-            fig1.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            
-if 'show_trend' in locals() and show_trend:
-    add_linear_trendline(fig1, evo["MES"], evo["MTTR_HR"], name="Tendencia")
-if 'auto_zoom_y' in locals() and auto_zoom_y:
-    yr = compute_auto_y_range(evo["MTTR_HR"], is_percent=False)
-    if yr is not None:
-        fig1.update_yaxes(range=yr)
-            st.plotly_chart(fig1, width="stretch")
-        with r1c2:
-            fig2 = px.bar(evo, x="MES", y="MTBF_HR", title="MTBF (h/falla) por mes")
-            fig2.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            
-if 'show_trend' in locals() and show_trend:
-    add_linear_trendline(fig2, evo["MES"], evo["MTBF_HR"], name="Tendencia")
-if 'auto_zoom_y' in locals() and auto_zoom_y:
-    yr = compute_auto_y_range(evo["MTBF_HR"], is_percent=False)
-    if yr is not None:
-        fig2.update_yaxes(range=yr)
-            st.plotly_chart(fig2, width="stretch")
+            r3c1, r3c2 = st.columns(2)
+            with r3c1:
+                fig5 = px.bar(evo, x="MES", y="TO_HR", title="Tiempo de Operación (TO) por mes (h)")
+                fig5.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
+                if show_trend:
+                    add_linear_trendline(fig5, evo["MES"], evo["TO_HR"], name="Tendencia")
+                _add_target(fig5, evo["MES"], evo["MES"], target_key="META_TO_HR", is_percent=False, name="Meta")
+                _apply_y(fig5, evo["TO_HR"], is_percent=False, manual_on=use_manual_y_to, manual_min=to_ymin, manual_max=to_ymax)
+                st.plotly_chart(fig5, width="stretch")
 
-        r2c1, r2c2 = st.columns(2)
-        with r2c1:
-            fig3 = px.bar(evo, x="MES", y="DISP", title="Disponibilidad (TO/(TO+DT)) por mes")
-            fig3.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20), yaxis_tickformat=".0%")
-            
-if 'show_trend' in locals() and show_trend:
-    add_linear_trendline(fig3, evo["MES"], evo["DISP"], name="Tendencia")
-if 'auto_zoom_y' in locals() and auto_zoom_y:
-    yr = compute_auto_y_range(evo["DISP"], is_percent=True)
-    if yr is not None:
-        fig3.update_yaxes(range=yr)
-            st.plotly_chart(fig3, width="stretch")
-        with r2c2:
-            fig4 = px.bar(evo, x="MES", y="FALLAS", title="Cantidad de fallas por mes")
-            fig4.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            
-if 'show_trend' in locals() and show_trend:
-    add_linear_trendline(fig4, evo["MES"], evo["FALLAS"], name="Tendencia")
-if 'auto_zoom_y' in locals() and auto_zoom_y:
-    yr = compute_auto_y_range(evo["FALLAS"], is_percent=False)
-    if yr is not None:
-        fig4.update_yaxes(range=yr)
-            st.plotly_chart(fig4, width="stretch")
-
-        r3c1, r3c2 = st.columns(2)
-        with r3c1:
-            fig5 = px.bar(evo, x="MES", y="TO_HR", title="Tiempo de Operación (TO) por mes (h)")
-            fig5.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            
-if 'show_trend' in locals() and show_trend:
-    add_linear_trendline(fig5, evo["MES"], evo["TO_HR"], name="Tendencia")
-if 'auto_zoom_y' in locals() and auto_zoom_y:
-    yr = compute_auto_y_range(evo["TO_HR"], is_percent=False)
-    if yr is not None:
-        fig5.update_yaxes(range=yr)
-            st.plotly_chart(fig5, width="stretch")
-        with r3c2:
-            fig6 = px.bar(evo, x="MES", y="DT_HR", title="Down Time por mes (h)")
-            fig6.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            
-if 'show_trend' in locals() and show_trend:
-    add_linear_trendline(fig6, evo["MES"], evo["DT_HR"], name="Tendencia")
-if 'auto_zoom_y' in locals() and auto_zoom_y:
-    yr = compute_auto_y_range(evo["DT_HR"], is_percent=False)
-    if yr is not None:
-        fig6.update_yaxes(range=yr)
-            st.plotly_chart(fig6, width="stretch")
+            with r3c2:
+                fig6 = px.bar(evo, x="MES", y="DT_HR", title="Down Time por mes (h)")
+                fig6.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
+                if show_trend:
+                    add_linear_trendline(fig6, evo["MES"], evo["DT_HR"], name="Tendencia")
+                _add_target(fig6, evo["MES"], evo["MES"], target_key="META_DT_HR", is_percent=False, name="Meta")
+                _apply_y(fig6, evo["DT_HR"], is_percent=False, manual_on=use_manual_y_dt, manual_min=dt_ymin, manual_max=dt_ymax)
+                st.plotly_chart(fig6, width="stretch")
 
     st.subheader("Descargar datos filtrados")
     st.download_button(
