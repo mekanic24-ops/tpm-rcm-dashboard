@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional, List, Dict
 
 import numpy as np
+import hashlib
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -2094,18 +2095,30 @@ else:  # page == "Técnico"
             if "tec_exec_msg" not in st.session_state:
                 st.session_state["tec_exec_msg"] = ""
 
-            gen = st.button("⚡ Generar / Actualizar mensaje", key="tec_exec_btn")
-            if gen or (not st.session_state["tec_exec_msg"]):
-                # Contexto compacto solo para este mensaje
-                filtros_txt = (
-                    f"Vista: {vista_disp} | Rango UI: {date_range} | Cultivo: {cult_choice} | Turno: {turn_choice}\n"
-                    f"Propietario: {prop_sel} | Familia: {fam_sel} | Tractor: {trc_sel} | Implemento: {imp_sel} | Proceso: {proc_name_sel}\n"
-                    f"Cascada: Equipo={eq_sel}, Subunidad={sis_sel}, Componente={com_sel}, Parte={par_sel}\n"
-                    f"KPIs: TO={to_real:.2f}h, DT={dt_hr:.2f}h, Fallas={n_fallas}, MTTR={mttr if pd.notna(mttr) else 'NA'}, MTBF={mtbf if pd.notna(mtbf) else 'NA'}, Disp={disp_tec if pd.notna(disp_tec) else 'NA'}\n"
-                    f"Criterio priorización: {crit}\n"
-                )
-                top3_csv = plan_top3.to_csv(index=False) if isinstance(plan_top3, pd.DataFrame) and not plan_top3.empty else "(sin Top 3)"
-                check_txt = "\n".join([f"- {k}: {', '.join(v) if v else '(sin checks)'}" for k, v in plan_check_state.items()]) if plan_check_state else "(sin checklist)"
+            auto_refresh = st.toggle("Auto-actualizar con filtros", value=True, key="tec_exec_auto")
+            gen = st.button("⚡ Generar / Actualizar ahora", key="tec_exec_btn")
+
+            # Contexto compacto (si cambia, el mensaje debe cambiar)
+            filtros_txt = (
+                f"Vista: {vista_disp} | Rango UI: {date_range} | Cultivo: {cult_choice} | Turno: {turn_choice}\n"
+                f"Propietario: {prop_sel} | Familia: {fam_sel} | Tractor: {trc_sel} | Implemento: {imp_sel} | Proceso: {proc_name_sel}\n"
+                f"Cascada: Equipo={eq_sel}, Subunidad={sis_sel}, Componente={com_sel}, Parte={par_sel}\n"
+                f"KPIs: TO={to_real:.2f}h, DT={dt_hr:.2f}h, Fallas={n_fallas}, MTTR={mttr if pd.notna(mttr) else 'NA'}, MTBF={mtbf if pd.notna(mtbf) else 'NA'}, Disp={disp_tec if pd.notna(disp_tec) else 'NA'}\n"
+                f"Criterio priorización: {crit}\n"
+            )
+            top3_csv = plan_top3.to_csv(index=False) if isinstance(plan_top3, pd.DataFrame) and not plan_top3.empty else "(sin Top 3)"
+            check_txt = "\n".join([f"- {k}: {', '.join(v) if v else '(sin checks)'}" for k, v in plan_check_state.items()]) if plan_check_state else "(sin checklist)"
+
+            # Firma del contexto (para detectar cambios de filtros / Top 3 / checklist)
+            sig_src = filtros_txt + "\n" + top3_csv + "\n" + check_txt
+            sig = hashlib.md5(sig_src.encode("utf-8")).hexdigest()
+
+            if "tec_exec_sig" not in st.session_state:
+                st.session_state["tec_exec_sig"] = ""
+
+            should_regen = gen or (not st.session_state["tec_exec_msg"]) or (auto_refresh and st.session_state["tec_exec_sig"] != sig)
+
+            if should_regen:
                 prompt = (
                     "Genera un mensaje ejecutivo (máximo 10 líneas) para el jefe de maquinaria. "
                     "Debe responder: (1) qué está pegando el desempeño, (2) Top 3 priorizados y por qué, "
@@ -2127,8 +2140,10 @@ else:  # page == "Técnico"
                         ],
                     )
                     st.session_state["tec_exec_msg"] = getattr(resp, "output_text", "") or ""
+                    st.session_state["tec_exec_sig"] = sig
                 except Exception as e:
                     st.session_state["tec_exec_msg"] = f"Error al generar mensaje: {e}"
+                    st.session_state["tec_exec_sig"] = sig
 
             st.text_area("Mensaje ejecutivo (autogenerado)", value=st.session_state.get("tec_exec_msg",""), height=220, key="tec_exec_area")
 
