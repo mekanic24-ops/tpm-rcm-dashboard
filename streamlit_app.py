@@ -20,6 +20,7 @@ st.set_page_config(page_title="DESEMPEÑO OPERACIONAL DE LA FLOTA", layout="wide
 ZIP_NAME = "TPM_modelo_normalizado_CSV.zip"
 DATA_DIR = Path("data_normalizada")
 
+
 # =========================================================
 # OPENAI (Asistente IA)
 # =========================================================
@@ -330,13 +331,74 @@ Top 3 items: {items_txt}
 """.strip()
     return ctx
 
+def build_pareto_exec_context(
+    *,
+    filtros_txt: str,
+    fd_view: pd.DataFrame,
+    top_n: int = 10,
+) -> str:
+    """
+    Contexto (texto) para el Mensaje Ejecutivo en la página Paretos.
+    Enfocado en: "¿Dónde se va el downtime?" y decisiones gerenciales.
+    """
+    if fd_view is None or fd_view.empty:
+        return f"=== FILTROS (resumen) ===\n{filtros_txt}\n\n(Sin datos para Paretos con los filtros actuales)"
+
+    df = fd_view.copy()
+    if "DOWNTIME_HR" not in df.columns:
+        return f"=== FILTROS (resumen) ===\n{filtros_txt}\n\n(No existe DOWNTIME_HR para resumir Paretos)"
+
+    df["DOWNTIME_HR"] = pd.to_numeric(df["DOWNTIME_HR"], errors="coerce").fillna(0.0)
+    total_dt = float(df["DOWNTIME_HR"].sum())
+    total_fallas = int(len(df))
+
+    # Paretos principales (si existen las columnas)
+    p_sub = pareto_table(df, "SUBUNIDAD", "DOWNTIME_HR", top_n=top_n) if "SUBUNIDAD" in df.columns else pd.DataFrame()
+    p_com = pareto_table(df, "COMPONENTE", "DOWNTIME_HR", top_n=top_n) if "COMPONENTE" in df.columns else pd.DataFrame()
+    p_par = pareto_table(df, "PARTE", "DOWNTIME_HR", top_n=top_n) if "PARTE" in df.columns else pd.DataFrame()
+    p_cau = pareto_table(df, "CAUSA_FALLA", "DOWNTIME_HR", top_n=top_n) if "CAUSA_FALLA" in df.columns else pd.DataFrame()
+
+    equipo_col = find_first_col(df, ["EQUIPO", "ID_EQUIPO", "ID_EQUIPO_AFECTADO"])
+    p_eq = pareto_table(df, equipo_col, "DOWNTIME_HR", top_n=top_n) if equipo_col else pd.DataFrame()
+
+    def _top_share(p: pd.DataFrame, k: int) -> float:
+        if p is None or p.empty or "PCT" not in p.columns:
+            return float("nan")
+        return float(p.head(k)["PCT"].sum())
+
+    def _top_items(p: pd.DataFrame, dim_col: str, k: int = 3) -> str:
+        if p is None or p.empty or dim_col not in p.columns:
+            return "NA"
+        return ", ".join([str(x) for x in p.head(k)[dim_col].tolist()])
+
+    ctx = f"""
+=== FILTROS (resumen) ===
+{filtros_txt}
+
+=== BASE PARETOS (periodo UI) ===
+Downtime total: {_fmt_num(total_dt,1)} h
+Fallas (registros): {_fmt_num(total_fallas,0)}
+
+=== PARETOS (Downtime) ===
+SUBUNIDAD: Top1={_fmt_pct(_top_share(p_sub,1))} | Top3={_fmt_pct(_top_share(p_sub,3))} | Top3 items: {_top_items(p_sub,"SUBUNIDAD",3)}
+COMPONENTE: Top1={_fmt_pct(_top_share(p_com,1))} | Top3={_fmt_pct(_top_share(p_com,3))} | Top3 items: {_top_items(p_com,"COMPONENTE",3)}
+PARTE: Top1={_fmt_pct(_top_share(p_par,1))} | Top3={_fmt_pct(_top_share(p_par,3))} | Top3 items: {_top_items(p_par,"PARTE",3)}
+CAUSA_FALLA: Top1={_fmt_pct(_top_share(p_cau,1))} | Top3={_fmt_pct(_top_share(p_cau,3))} | Top3 items: {_top_items(p_cau,"CAUSA_FALLA",3)}
+EQUIPO: Top1={_fmt_pct(_top_share(p_eq,1))} | Top3={_fmt_pct(_top_share(p_eq,3))} | Top3 items: {_top_items(p_eq, equipo_col or "EQUIPO",3)}
+""".strip()
+    return ctx
+
 @st.cache_data(show_spinner=False, ttl=300)
 def _exec_msg_cache(model_name: str, ctx: str):
     # cachea por combinación (modelo + contexto)
     return {"model": model_name, "ctx": ctx}
 
-def generate_exec_message(client, model_name: str, ctx: str) -> str:
-    sys_prompt = (
+def generate_exec_message(client, model_name: str, ctx: str, sys_prompt_override: Optional[str] = None) -> str:
+    """
+    Genera un mensaje ejecutivo corto usando OpenAI.
+    - sys_prompt_override: si se provee, reemplaza el prompt del sistema.
+    """
+    sys_prompt = sys_prompt_override or (
         "Eres un Gerente de Confiabilidad Senior reportando a Dirección. "
         "Con el contexto provisto, escribe un MENSAJE EJECUTIVO (máx 8 líneas) con: "
         "(1) estado: bajo control / en riesgo / fuera de control, "
@@ -356,6 +418,7 @@ def generate_exec_message(client, model_name: str, ctx: str) -> str:
         return getattr(resp, "output_text", None) or ""
     except Exception as e:
         return f"❌ No se pudo generar el mensaje ejecutivo: {e}"
+
 
 def render_shared_ai_assistant(
     *,
@@ -800,118 +863,6 @@ def pareto_chart(df: pd.DataFrame, dim_col: str, val_col: str, top_n: int, title
     )
     st.plotly_chart(fig, width="stretch")
 
-
-
-# ---------------------------------------------------------
-# Helpers: tendencia (regresión lineal) + metas + auto-zoom eje Y
-# ---------------------------------------------------------
-def add_linear_trendline(fig: go.Figure, x_labels, y_values, *, name: str = "Tendencia"):
-    """Agrega una línea de tendencia por regresión lineal (y = a*x + b) sobre un eje categórico."""
-    if y_values is None:
-        return fig
-    y = pd.to_numeric(pd.Series(y_values), errors="coerce")
-    x_idx = np.arange(len(y), dtype=float)
-
-    m = y.notna().values
-    if m.sum() < 2:
-        return fig
-
-    x_fit = x_idx[m]
-    y_fit = y.values[m].astype(float)
-
-    try:
-        a, b = np.polyfit(x_fit, y_fit, 1)
-    except Exception:
-        return fig
-
-    y_hat = a * x_idx + b
-    fig.add_trace(
-        go.Scatter(
-            x=list(x_labels),
-            y=y_hat,
-            mode="lines",
-            name=name,
-            line=dict(color="green", width=3),
-            hovertemplate=f"{name}: %{{y}}<extra></extra>",
-        )
-    )
-    return fig
-
-def add_goal_line(fig: go.Figure, y: float, *, label: str = "Meta"):
-    """Agrega una línea horizontal de meta (roja) al gráfico."""
-    if y is None or (isinstance(y, float) and np.isnan(y)):
-        return fig
-    try:
-        fig.add_hline(
-            y=float(y),
-            line_color="red",
-            line_dash="dash",
-            line_width=2,
-            annotation_text=label,
-            annotation_position="top left",
-        )
-    except Exception:
-        # Fallback para versiones antiguas de plotly
-        fig.add_shape(
-            type="line",
-            xref="paper",
-            x0=0,
-            x1=1,
-            yref="y",
-            y0=float(y),
-            y1=float(y),
-            line=dict(color="red", width=2, dash="dash"),
-        )
-    return fig
-
-def compute_auto_y_range(values, *, is_percent: bool = False):
-    """Calcula un rango Y 'inteligente' para resaltar variaciones pequeñas (ej: DISP cerca de 100%)."""
-    s = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
-    if s.empty:
-        return None
-
-    vmin = float(s.min())
-    vmax = float(s.max())
-    span = vmax - vmin
-
-    if is_percent:
-        if vmax >= 0.90 and span <= 0.03:
-            lo = max(0.0, vmin - 0.01)
-            hi = min(1.0, vmax + 0.005)
-            if (hi - lo) < 0.02:
-                mid = (hi + lo) / 2.0
-                lo = max(0.0, mid - 0.01)
-                hi = min(1.0, mid + 0.01)
-            return [lo, hi]
-
-        pad = 0.10 * (span if span > 0 else 0.05)
-        lo = max(0.0, vmin - pad)
-        hi = min(1.0, vmax + pad)
-        return [lo, hi]
-
-    if span == 0:
-        pad = max(1.0, abs(vmax) * 0.10)
-        return [vmin - pad, vmax + pad]
-
-    pad = 0.10 * span
-    lo = vmin - pad
-    hi = vmax + pad
-    if vmin >= 0:
-        lo = max(0.0, lo)
-    return [lo, hi]
-
-def apply_y_range(fig: go.Figure, values, *, is_percent: bool, use_manual: bool, y_min: float, y_max: float):
-    """Aplica rango Y manual o auto-zoom."""
-    if use_manual and y_max is not None and y_min is not None and float(y_max) > float(y_min):
-        fig.update_yaxes(range=[float(y_min), float(y_max)])
-        return fig
-
-    r = compute_auto_y_range(values, is_percent=is_percent)
-    if r:
-        fig.update_yaxes(range=r)
-    return fig
-
-
 # =========================================================
 # LOAD
 # =========================================================
@@ -1207,120 +1158,34 @@ if page == "Dashboard":
         evo["DISP"] = np.where((evo["TO_HR"] + evo["DT_HR"]) > 0, evo["TO_HR"] / (evo["TO_HR"] + evo["DT_HR"]), np.nan)
         evo = evo.sort_values("MES", ascending=True)
 
-        # -------------------------------
-        # Opciones de gráficos (tendencia / metas / rango Y)
-        # -------------------------------
-        with st.expander("⚙️ Opciones de gráficos (tendencia / metas / rango Y)", expanded=False):
-            show_trend = st.checkbox("Mostrar línea de tendencia (regresión lineal)", value=True, key="db_show_trend")
-            show_goal = st.checkbox("Mostrar línea de meta", value=True, key="db_show_goal")
-
-            # Metas (editables)
-            cA, cB, cC = st.columns(3)
-            with cA:
-                meta_disp_pct = st.number_input("Meta DISP (%)", min_value=0.0, max_value=100.0, value=float(st.session_state.get("db_meta_disp_pct", 95.0)), step=0.1, key="db_meta_disp_pct")
-                meta_mttr = st.number_input("Meta MTTR (h)", min_value=0.0, value=float(st.session_state.get("db_meta_mttr", 2.5)), step=0.1, key="db_meta_mttr")
-            with cB:
-                meta_mtbf = st.number_input("Meta MTBF (h)", min_value=0.0, value=float(st.session_state.get("db_meta_mtbf", 120.0)), step=1.0, key="db_meta_mtbf")
-                meta_fallas = st.number_input("Meta FALLAS (n)", min_value=0.0, value=float(st.session_state.get("db_meta_fallas", 0.0)), step=1.0, key="db_meta_fallas")
-            with cC:
-                meta_to = st.number_input("Meta TO (h)", min_value=0.0, value=float(st.session_state.get("db_meta_to", 0.0)), step=10.0, key="db_meta_to")
-                meta_dt = st.number_input("Meta Down Time (h)", min_value=0.0, value=float(st.session_state.get("db_meta_dt", 0.0)), step=1.0, key="db_meta_dt")
-
-            st.markdown("**Rango Y manual (opcional)**: activa y define min/max. Si no, se usa auto-zoom.")
-            rA, rB, rC = st.columns(3)
-
-            def _safe_max(series, fallback=1.0):
-                try:
-                    v = pd.to_numeric(series, errors="coerce").dropna()
-                    return float(v.max()) if not v.empty else float(fallback)
-                except Exception:
-                    return float(fallback)
-
-            with rA:
-                use_y_mttr = st.checkbox("Rango Y manual MTTR", value=False, key="db_use_y_mttr")
-                y_mttr_min = st.number_input("MTTR Y min", value=0.0, step=0.1, key="db_y_mttr_min")
-                y_mttr_max = st.number_input("MTTR Y max", value=_safe_max(evo["MTTR_HR"], 1.0) * 1.10, step=0.1, key="db_y_mttr_max")
-            with rB:
-                use_y_mtbf = st.checkbox("Rango Y manual MTBF", value=False, key="db_use_y_mtbf")
-                y_mtbf_min = st.number_input("MTBF Y min", value=0.0, step=1.0, key="db_y_mtbf_min")
-                y_mtbf_max = st.number_input("MTBF Y max", value=_safe_max(evo["MTBF_HR"], 10.0) * 1.10, step=1.0, key="db_y_mtbf_max")
-            with rC:
-                use_y_disp = st.checkbox("Rango Y manual DISP (%)", value=False, key="db_use_y_disp")
-                y_disp_min_pct = st.number_input("DISP Y min (%)", min_value=0.0, max_value=100.0, value=95.0, step=0.1, key="db_y_disp_min_pct")
-                y_disp_max_pct = st.number_input("DISP Y max (%)", min_value=0.0, max_value=100.0, value=100.0, step=0.1, key="db_y_disp_max_pct")
-
-            rD, rE, rF = st.columns(3)
-            with rD:
-                use_y_fallas = st.checkbox("Rango Y manual FALLAS", value=False, key="db_use_y_fallas")
-                y_fallas_min = st.number_input("FALLAS Y min", value=0.0, step=1.0, key="db_y_fallas_min")
-                y_fallas_max = st.number_input("FALLAS Y max", value=_safe_max(evo["FALLAS"], 1.0) * 1.10, step=1.0, key="db_y_fallas_max")
-            with rE:
-                use_y_to = st.checkbox("Rango Y manual TO", value=False, key="db_use_y_to")
-                y_to_min = st.number_input("TO Y min", value=0.0, step=10.0, key="db_y_to_min")
-                y_to_max = st.number_input("TO Y max", value=_safe_max(evo["TO_HR"], 10.0) * 1.10, step=10.0, key="db_y_to_max")
-            with rF:
-                use_y_dt = st.checkbox("Rango Y manual Down Time", value=False, key="db_use_y_dt")
-                y_dt_min = st.number_input("DT Y min", value=0.0, step=1.0, key="db_y_dt_min")
-                y_dt_max = st.number_input("DT Y max", value=_safe_max(evo["DT_HR"], 1.0) * 1.10, step=1.0, key="db_y_dt_max")
-
         r1c1, r1c2 = st.columns(2)
         with r1c1:
             fig1 = px.bar(evo, x="MES", y="MTTR_HR", title="MTTR (h/falla) por mes")
             fig1.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            if show_trend:
-                fig1 = add_linear_trendline(fig1, evo["MES"], evo["MTTR_HR"], name="Tendencia")
-            if show_goal and meta_mttr > 0:
-                fig1 = add_goal_line(fig1, meta_mttr, label="Meta")
-            fig1 = apply_y_range(fig1, evo["MTTR_HR"], is_percent=False, use_manual=use_y_mttr, y_min=y_mttr_min, y_max=y_mttr_max)
             st.plotly_chart(fig1, width="stretch")
         with r1c2:
             fig2 = px.bar(evo, x="MES", y="MTBF_HR", title="MTBF (h/falla) por mes")
             fig2.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            if show_trend:
-                fig2 = add_linear_trendline(fig2, evo["MES"], evo["MTBF_HR"], name="Tendencia")
-            if show_goal and meta_mtbf > 0:
-                fig2 = add_goal_line(fig2, meta_mtbf, label="Meta")
-            fig2 = apply_y_range(fig2, evo["MTBF_HR"], is_percent=False, use_manual=use_y_mtbf, y_min=y_mtbf_min, y_max=y_mtbf_max)
             st.plotly_chart(fig2, width="stretch")
 
         r2c1, r2c2 = st.columns(2)
         with r2c1:
             fig3 = px.bar(evo, x="MES", y="DISP", title="Disponibilidad (TO/(TO+DT)) por mes")
             fig3.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20), yaxis_tickformat=".0%")
-            if show_trend:
-                fig3 = add_linear_trendline(fig3, evo["MES"], evo["DISP"], name="Tendencia")
-            if show_goal and (meta_disp_pct/100.0) > 0:
-                fig3 = add_goal_line(fig3, (meta_disp_pct/100.0), label="Meta")
-            fig3 = apply_y_range(fig3, evo["DISP"], is_percent=True, use_manual=use_y_disp, y_min=(y_disp_min_pct/100.0), y_max=(y_disp_max_pct/100.0))
             st.plotly_chart(fig3, width="stretch")
         with r2c2:
             fig4 = px.bar(evo, x="MES", y="FALLAS", title="Cantidad de fallas por mes")
             fig4.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            if show_trend:
-                fig4 = add_linear_trendline(fig4, evo["MES"], evo["FALLAS"], name="Tendencia")
-            if show_goal and meta_fallas > 0:
-                fig4 = add_goal_line(fig4, meta_fallas, label="Meta")
-            fig4 = apply_y_range(fig4, evo["FALLAS"], is_percent=False, use_manual=use_y_fallas, y_min=y_fallas_min, y_max=y_fallas_max)
             st.plotly_chart(fig4, width="stretch")
 
         r3c1, r3c2 = st.columns(2)
         with r3c1:
             fig5 = px.bar(evo, x="MES", y="TO_HR", title="Tiempo de Operación (TO) por mes (h)")
             fig5.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            if show_trend:
-                fig5 = add_linear_trendline(fig5, evo["MES"], evo["TO_HR"], name="Tendencia")
-            if show_goal and meta_to > 0:
-                fig5 = add_goal_line(fig5, meta_to, label="Meta")
-            fig5 = apply_y_range(fig5, evo["TO_HR"], is_percent=False, use_manual=use_y_to, y_min=y_to_min, y_max=y_to_max)
             st.plotly_chart(fig5, width="stretch")
         with r3c2:
             fig6 = px.bar(evo, x="MES", y="DT_HR", title="Down Time por mes (h)")
             fig6.update_layout(title_x=0.5, margin=dict(l=20, r=20, t=60, b=20))
-            if show_trend:
-                fig6 = add_linear_trendline(fig6, evo["MES"], evo["DT_HR"], name="Tendencia")
-            if show_goal and meta_dt > 0:
-                fig6 = add_goal_line(fig6, meta_dt, label="Meta")
-            fig6 = apply_y_range(fig6, evo["DT_HR"], is_percent=False, use_manual=use_y_dt, y_min=y_dt_min, y_max=y_dt_max)
             st.plotly_chart(fig6, width="stretch")
 
     st.subheader("Descargar datos filtrados")
@@ -1350,6 +1215,8 @@ if page == "Dashboard":
             mime="text/csv",
         )
 
+
+    
 
     # =========================================================
     # MENSAJE EJECUTIVO AUTOMÁTICO (Dashboard)
@@ -1475,7 +1342,6 @@ if page == "Dashboard":
             ctx_dash += df_compact(top_comp, "Top 10 Componentes por Downtime (rango UI)", n=10)
 
     render_shared_ai_assistant(page_name="Dashboard", ctx=ctx_dash, client=client)
-
 elif page == "Paretos":
     st.title("Paretos de Fallas + Mapas de calor")
     st.caption("Paretos por Down Time (h) y heatmaps por Equipo vs Nivel (SUBUNIDAD/COMPONENTE/PARTE).")
@@ -1658,6 +1524,51 @@ elif page == "Paretos":
         st.plotly_chart(fig_hm_ct, width="stretch")
 
 
+    # =========================================================
+    # MENSAJE EJECUTIVO AUTOMÁTICO (Paretos)
+    # =========================================================
+    st.subheader("📌 Mensaje Ejecutivo – Paretos (Prioridad gerencial por Downtime)")
+
+    filtros_txt_par = (
+        f"Vista: {vista_disp}\n"
+        f"Rango fechas (UI): {date_range}\n"
+        f"Cultivo: {cult_choice} | Turno: {turn_choice}\n"
+        f"Propietario: {prop_sel} | Familia: {fam_sel}\n"
+        f"Tractor: {trc_sel} | Implemento: {imp_sel}\n"
+        f"Proceso: {proc_name_sel}"
+    )
+
+    ctx_exec_par = build_pareto_exec_context(
+        filtros_txt=filtros_txt_par,
+        fd_view=fd_view,
+        top_n=int(top_n),
+    )
+
+    pareto_sys_prompt = (
+        "Eres un Gerente de Operaciones y Confiabilidad. "
+        "Con el contexto provisto, escribe un MENSAJE EJECUTIVO (máx 10 líneas) "
+        "en formato de CICLO DE DECISIÓN: "
+        "(1) Diagnóstico: dónde se va el downtime (Top 3 + %), "
+        "(2) Impacto: por qué importa (en horas), "
+        "(3) Decisión recomendada: foco Top1 o Top3 y por qué, "
+        "(4) Plan 7–14 días: 3 acciones con responsables sugeridos (Mantenimiento/Producción/Almacén/Proveedor), "
+        "(5) Plan 30–60 días: 2 acciones estructurales, "
+        "(6) 1 indicador de seguimiento (meta de reducción de downtime). "
+        "Sé concreto. No inventes datos. Si falta una columna clave, dilo."
+    )
+
+    if client is None:
+        st.info("Configura **OPENAI_API_KEY** en Secrets para habilitar el Mensaje Ejecutivo automático.")
+    else:
+        model_name = st.secrets.get("OPENAI_MODEL", "gpt-4o-mini")
+        msg_exec_par = generate_exec_message(
+            client,
+            model_name,
+            ctx_exec_par,
+            sys_prompt_override=pareto_sys_prompt,
+        ).strip()
+        st.info(msg_exec_par if msg_exec_par else "No se pudo generar el mensaje ejecutivo con el contexto actual.")
+
     st.divider()
     # -------------------------
     # Asistente IA (Paretos)
@@ -1702,10 +1613,10 @@ elif page == "Paretos":
         ctx_par += df_compact(pivot_ct.reset_index(), "Heatmap #Fallas (tabla)", n=12)
 
     render_shared_ai_assistant(page_name="Paretos", ctx=ctx_par, client=client)
-
-
 else:  # page == "Técnico"
     st.title("Dashboard Técnico (Para acción y mejora)")
+
+    st.divider()
     st.caption("Objetivo: ¿Qué falla? ¿Dónde intervenir primero? ¿Preventivo o correctivo? ¿Qué atacar con RCM?")
 
     # ---------------------------------
@@ -1842,7 +1753,7 @@ else:  # page == "Técnico"
     st.subheader("3) Análisis de fallas por nivel (barras)")
 
     def bar_fallas(df_in, col, title, top=15):
-        if col is None or col not in df_in.columns:
+        if df_in is None or df_in.empty or col is None or col not in df_in.columns:
             return None
         g = df_in.groupby(col, dropna=True).size().reset_index(name="FALLAS")
         g[col] = g[col].astype(str)
@@ -1858,22 +1769,13 @@ else:  # page == "Técnico"
     bc1, bc2, bc3 = st.columns(3)
     with bc1:
         fig = bar_fallas(df_lvl, sistema_col, "Fallas por Sub unidad", top=top_barras)
-        if fig is not None:
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Sin datos para Sub unidad.")
+        st.plotly_chart(fig, use_container_width=True) if fig else st.info("Sin datos para Sub unidad.")
     with bc2:
         fig = bar_fallas(df_lvl, comp_col, "Fallas por Componente", top=top_barras)
-        if fig is not None:
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Sin datos para Componente.")
+        st.plotly_chart(fig, use_container_width=True) if fig else st.info("Sin datos para Componente.")
     with bc3:
         fig = bar_fallas(df_lvl, parte_col, "Fallas por Parte", top=top_barras)
-        if fig is not None:
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Sin datos para Parte.")
+        st.plotly_chart(fig, use_container_width=True) if fig else st.info("Sin datos para Parte.")
 
     st.divider()
 
