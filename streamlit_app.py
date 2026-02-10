@@ -2013,6 +2013,125 @@ else:  # page == "Técnico"
             d = g.sort_values("DT_HR", ascending=False).head(10)
             st.plotly_chart(px.bar(d, x="DT_HR", y="ITEM", orientation="h"), use_container_width=True)
 
+
+    # ---------------------------------
+    # 5) Ciclo de decisión técnico (acción: qué hago mañana)
+    # ---------------------------------
+    st.subheader("5) Ciclo de decisión técnico (qué hago mañana)")
+    st.caption("Convierte el análisis en un plan operativo: selecciona el criterio, revisa el **Top 3**, completa el checklist y pide al asistente un plan de intervención.")
+
+    top_level_plan = comp_col if (comp_col and comp_col in df_lvl.columns) else parte_col
+    if top_level_plan is None or top_level_plan not in df_lvl.columns:
+        st.info("No hay nivel (COMPONENTE/PARTE) para generar el ciclo de decisión.")
+        plan_top3 = pd.DataFrame()
+        plan_check_state = {}
+    else:
+        g_plan = df_lvl.groupby(top_level_plan, dropna=True).agg(
+            FALLAS=("DOWNTIME_HR", "size"),
+            DT_HR=("DOWNTIME_HR", "sum"),
+        ).reset_index().rename(columns={top_level_plan: "ITEM"})
+        g_plan["ITEM"] = g_plan["ITEM"].astype(str)
+        g_plan["MTTR_HR"] = np.where(g_plan["FALLAS"] > 0, g_plan["DT_HR"] / g_plan["FALLAS"], np.nan)
+        g_plan["MTBF_HR"] = np.where(g_plan["FALLAS"] > 0, to_real / g_plan["FALLAS"], np.nan)
+
+        crit = st.radio(
+            "Criterio para priorizar",
+            ["MTTR alto (falla difícil)", "Down Time alto (impacto)", "Frecuencia alta (muchas fallas)", "MTBF bajo (poca confiabilidad)"],
+            index=0,
+            horizontal=True,
+            key="tec_plan_crit",
+        )
+
+        if crit.startswith("MTTR"):
+            plan_top3 = g_plan.dropna(subset=["MTTR_HR"]).sort_values("MTTR_HR", ascending=False).head(3).copy()
+        elif crit.startswith("Down Time"):
+            plan_top3 = g_plan.sort_values("DT_HR", ascending=False).head(3).copy()
+        elif crit.startswith("Frecuencia"):
+            plan_top3 = g_plan.sort_values("FALLAS", ascending=False).head(3).copy()
+        else:  # MTBF bajo
+            plan_top3 = g_plan.dropna(subset=["MTBF_HR"]).sort_values("MTBF_HR", ascending=True).head(3).copy()
+
+        st.markdown("**Top 3 priorizados (con filtros actuales + cascada + vista):**")
+        if plan_top3.empty:
+            st.info("No hay datos suficientes para construir el Top 3 con el criterio elegido.")
+        else:
+            show_cols = ["ITEM", "FALLAS", "DT_HR", "MTTR_HR", "MTBF_HR"]
+            st.dataframe(plan_top3[show_cols], use_container_width=True, height=160)
+
+        st.markdown("**Checklist de intervención (por ítem):**")
+        checklist_items = [
+            ("Seguridad/Permiso", "IPERC/ATS aplicado, LOTO/aislamiento, EPP completo, área señalizada."),
+            ("Confirmación del síntoma", "Validar falla real (operador + evidencia), reproducir si es seguro, registrar condiciones."),
+            ("Diagnóstico rápido", "Inspección visual + pruebas básicas (fugas, holguras, presión/temperatura, conexiones)."),
+            ("Repuestos y herramientas", "Confirmar stock / OT / herramientas especiales, tiempos de suministro."),
+            ("Causa probable", "Plantear 1–3 hipótesis (contaminación, desgaste, ajuste, lubricación, operación)."),
+            ("Acción correctiva", "Definir intervención mínima viable para volver a operar con confiabilidad."),
+            ("Prevención", "Definir acción preventiva/predictiva (frecuencia, condición, estándar, capacitación)."),
+            ("Evidencia", "Fotos, mediciones, piezas reemplazadas, HH, cierre con hallazgos."),
+        ]
+
+        plan_check_state = {}
+        if not plan_top3.empty:
+            for i, row in plan_top3.reset_index(drop=True).iterrows():
+                item = str(row["ITEM"])
+                with st.expander(f"✅ Checklist — {item}", expanded=(i == 0)):
+                    checked = []
+                    for k, (lbl, desc) in enumerate(checklist_items):
+                        ck = st.checkbox(lbl, value=False, key=f"tec_ck_{i}_{k}_{lbl}")
+                        st.caption(desc)
+                        if ck:
+                            checked.append(lbl)
+                    plan_check_state[item] = checked
+
+        # ---- Mensaje ejecutivo automático (Técnico) usando IA ----
+        st.subheader("📌 Mensaje Ejecutivo – Técnico (plan de acción)")
+        st.caption("Resumen automático con foco en: Top 3, riesgo operativo y acciones para mañana.")
+
+        client_plan = get_openai_client()
+        if client_plan is None:
+            st.info("Para activar el mensaje automático, configura **OPENAI_API_KEY** en *Streamlit Cloud → App settings → Secrets*.")
+        else:
+            if "tec_exec_msg" not in st.session_state:
+                st.session_state["tec_exec_msg"] = ""
+
+            gen = st.button("⚡ Generar / Actualizar mensaje", key="tec_exec_btn")
+            if gen or (not st.session_state["tec_exec_msg"]):
+                # Contexto compacto solo para este mensaje
+                filtros_txt = (
+                    f"Vista: {vista_disp} | Rango UI: {date_range} | Cultivo: {cult_choice} | Turno: {turn_choice}\n"
+                    f"Propietario: {prop_sel} | Familia: {fam_sel} | Tractor: {trc_sel} | Implemento: {imp_sel} | Proceso: {proc_name_sel}\n"
+                    f"Cascada: Equipo={eq_sel}, Subunidad={sis_sel}, Componente={com_sel}, Parte={par_sel}\n"
+                    f"KPIs: TO={to_real:.2f}h, DT={dt_hr:.2f}h, Fallas={n_fallas}, MTTR={mttr if pd.notna(mttr) else 'NA'}, MTBF={mtbf if pd.notna(mtbf) else 'NA'}, Disp={disp_tec if pd.notna(disp_tec) else 'NA'}\n"
+                    f"Criterio priorización: {crit}\n"
+                )
+                top3_csv = plan_top3.to_csv(index=False) if isinstance(plan_top3, pd.DataFrame) and not plan_top3.empty else "(sin Top 3)"
+                check_txt = "\n".join([f"- {k}: {', '.join(v) if v else '(sin checks)'}" for k, v in plan_check_state.items()]) if plan_check_state else "(sin checklist)"
+                prompt = (
+                    "Genera un mensaje ejecutivo (máximo 10 líneas) para el jefe de maquinaria. "
+                    "Debe responder: (1) qué está pegando el desempeño, (2) Top 3 priorizados y por qué, "
+                    "(3) qué haremos mañana (acciones concretas), (4) riesgos si no se actúa, "
+                    "(5) qué dato falta para cerrar causa raíz. "
+                    "No inventes. Usa SOLO los datos entregados."
+                    "\n\n=== FILTROS/KPIs ===\n" + filtros_txt +
+                    "\n=== TOP 3 (tabla) ===\n" + top3_csv +
+                    "\n=== CHECKLIST (estado) ===\n" + check_txt
+                )
+
+                try:
+                    model_name = st.secrets.get("OPENAI_MODEL", "gpt-4o-mini")
+                    resp = client_plan.responses.create(
+                        model=model_name,
+                        input=[
+                            {"role": "system", "content": "Eres un asistente senior de confiabilidad RCM II/TPM. Sé directo y accionable."},
+                            {"role": "user", "content": prompt},
+                        ],
+                    )
+                    st.session_state["tec_exec_msg"] = getattr(resp, "output_text", "") or ""
+                except Exception as e:
+                    st.session_state["tec_exec_msg"] = f"Error al generar mensaje: {e}"
+
+            st.text_area("Mensaje ejecutivo (autogenerado)", value=st.session_state.get("tec_exec_msg",""), height=220, key="tec_exec_area")
+
     st.divider()
     # -------------------------
     # Asistente IA (COMPARTIDO) — Técnico (contexto rico)
@@ -2027,6 +2146,25 @@ else:  # page == "Técnico"
     ctx_tec += "=== KPIs TÉCNICOS (UI + CASCADA) ===\\n"
     ctx_tec += f"TO_real(h): {to_real:.2f} | DT(h): {dt_hr:.2f} | Fallas: {n_fallas}\\n"
     ctx_tec += f"MTTR(h/f): {mttr if pd.notna(mttr) else 'NA'} | MTBF(h/f): {mtbf if pd.notna(mtbf) else 'NA'} | Disp: {disp_tec if pd.notna(disp_tec) else 'NA'}\\n\\n"
+
+    ctx_tec += "=== PLAN DE ACCIÓN (Top 3 + checklist) ===\n"
+    try:
+        if isinstance(plan_top3, pd.DataFrame) and not plan_top3.empty:
+            ctx_tec += "Top 3 priorizados (tabla):\n" + plan_top3.to_csv(index=False) + "\n"
+        else:
+            ctx_tec += "(sin Top 3)\n"
+    except Exception:
+        ctx_tec += "(sin Top 3)\n"
+    try:
+        if isinstance(plan_check_state, dict) and plan_check_state:
+            ctx_tec += "Checklist (resumen):\n"
+            for k, v in plan_check_state.items():
+                ctx_tec += f"- {k}: {', '.join(v) if v else '(sin checks)'}\n"
+            ctx_tec += "\n"
+        else:
+            ctx_tec += "(sin checklist)\n\n"
+    except Exception:
+        ctx_tec += "(sin checklist)\n\n"
 
     evo12_t = trend_12m_monthly_kpis(
         turnos=turnos, horometros=horometros, eventos=eventos,
