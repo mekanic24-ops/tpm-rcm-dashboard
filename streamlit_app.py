@@ -2059,32 +2059,7 @@ else:  # page == "Técnico"
             show_cols = ["ITEM", "FALLAS", "DT_HR", "MTTR_HR", "MTBF_HR"]
             st.dataframe(plan_top3[show_cols], use_container_width=True, height=160)
 
-        st.markdown("**Checklist de intervención (por ítem):**")
-        checklist_items = [
-            ("Seguridad/Permiso", "IPERC/ATS aplicado, LOTO/aislamiento, EPP completo, área señalizada."),
-            ("Confirmación del síntoma", "Validar falla real (operador + evidencia), reproducir si es seguro, registrar condiciones."),
-            ("Diagnóstico rápido", "Inspección visual + pruebas básicas (fugas, holguras, presión/temperatura, conexiones)."),
-            ("Repuestos y herramientas", "Confirmar stock / OT / herramientas especiales, tiempos de suministro."),
-            ("Causa probable", "Plantear 1–3 hipótesis (contaminación, desgaste, ajuste, lubricación, operación)."),
-            ("Acción correctiva", "Definir intervención mínima viable para volver a operar con confiabilidad."),
-            ("Prevención", "Definir acción preventiva/predictiva (frecuencia, condición, estándar, capacitación)."),
-            ("Evidencia", "Fotos, mediciones, piezas reemplazadas, HH, cierre con hallazgos."),
-        ]
-
-        plan_check_state = {}
-        if not plan_top3.empty:
-            for i, row in plan_top3.reset_index(drop=True).iterrows():
-                item = str(row["ITEM"])
-                with st.expander(f"✅ Checklist — {item}", expanded=(i == 0)):
-                    checked = []
-                    for k, (lbl, desc) in enumerate(checklist_items):
-                        ck = st.checkbox(lbl, value=False, key=f"tec_ck_{i}_{k}_{lbl}")
-                        st.caption(desc)
-                        if ck:
-                            checked.append(lbl)
-                    plan_check_state[item] = checked
-
-        # ---- Mensaje ejecutivo automático (Técnico) usando IA ----
+                # ---- Mensaje ejecutivo automático (Técnico) usando IA ----
         st.subheader("📌 Mensaje Ejecutivo – Técnico (plan de acción)")
         st.caption("Resumen automático con foco en: Top 3, riesgo operativo y acciones para mañana.")
 
