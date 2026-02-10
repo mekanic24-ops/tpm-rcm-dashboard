@@ -2137,25 +2137,6 @@ else:  # page == "Técnico"
     ctx_tec += f"TO_real(h): {to_real:.2f} | DT(h): {dt_hr:.2f} | Fallas: {n_fallas}\\n"
     ctx_tec += f"MTTR(h/f): {mttr if pd.notna(mttr) else 'NA'} | MTBF(h/f): {mtbf if pd.notna(mtbf) else 'NA'} | Disp: {disp_tec if pd.notna(disp_tec) else 'NA'}\\n\\n"
 
-    ctx_tec += "=== PLAN DE ACCIÓN (Top 3 + checklist) ===\n"
-    try:
-        if isinstance(plan_top3, pd.DataFrame) and not plan_top3.empty:
-            ctx_tec += "Top 3 priorizados (tabla):\n" + plan_top3.to_csv(index=False) + "\n"
-        else:
-            ctx_tec += "(sin Top 3)\n"
-    except Exception:
-        ctx_tec += "(sin Top 3)\n"
-    try:
-        if isinstance(plan_check_state, dict) and plan_check_state:
-            ctx_tec += "Checklist (resumen):\n"
-            for k, v in plan_check_state.items():
-                ctx_tec += f"- {k}: {', '.join(v) if v else '(sin checks)'}\n"
-            ctx_tec += "\n"
-        else:
-            ctx_tec += "(sin checklist)\n\n"
-    except Exception:
-        ctx_tec += "(sin checklist)\n\n"
-
     evo12_t = trend_12m_monthly_kpis(
         turnos=turnos, horometros=horometros, eventos=eventos,
         vista_disp=vista_disp,
